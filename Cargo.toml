@@ -1,0 +1,21 @@
+[package]
+name = "vulkan-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = {version = "0.38.0", features = ["linked"]}
+ash-window = "0.13.0"
+bevy = { version = "0.18", features = [
+    "bevy_window",
+    "bevy_winit",
+    "debug"
+], default-features = false }
+bytemuck = "1.24.0"
+serde = "1.0.228"
+serde_json = "1.0.149"
+vk-mem = "0.5.0"
+winit = "0.30.12"
+
+[patch.crates-io]
+glam = { git = "https://github.com/BalintCsala/glam-rs.git", branch = "perspective-vulkan-0.30.10" }
