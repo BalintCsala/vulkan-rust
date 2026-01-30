@@ -1,4 +1,4 @@
-use std::{fs::File, time::Instant};
+use std::{fs::File, sync::Arc, time::Instant};
 
 use ash::vk;
 use bevy::{
@@ -10,7 +10,7 @@ use bevy::{
         query::With,
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Commands, In, Res, ResMut, Single},
+        system::{Commands, Res, ResMut, Single},
     },
     input::{
         ButtonInput, InputPlugin,
@@ -20,7 +20,7 @@ use bevy::{
     math::{Quat, Vec3},
     time::Time,
     transform::components::Transform,
-    window::{RawHandleWrapperHolder, Window, WindowPlugin, WindowResized, WindowResolution},
+    window::{RawHandleWrapperHolder, Window, WindowPlugin, WindowResolution},
     winit::WinitPlugin,
 };
 use bytemuck::{Pod, Zeroable};
@@ -29,9 +29,10 @@ use crate::{
     assets::{asset_manager::AssetManager, gltf::Gltf},
     rendering::{
         components::camera::{Camera, CameraResolution},
-        image::Image,
+        resource_manager::{ImageReference, ImageSize},
         shader::Shader,
-        vulkan_state::VulkanState,
+        vulkan_state::{self, VulkanState},
+        wrappers::device::Device,
     },
 };
 
@@ -50,12 +51,13 @@ struct PushConstant {
 
 #[derive(Resource)]
 struct RenderingRes {
-    device: ash::Device,
-    depth_buffer: Image,
+    device: Arc<Device>,
+    depth_buffer: ImageReference,
+    intermediary: ImageReference,
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     gltf: Gltf,
-    last_frame_check: Instant,
+    last_frame_time: Instant,
     frame: u32,
 }
 
@@ -93,10 +95,7 @@ fn main() {
             },
         ))
         .add_systems(Startup, (init_rendering, setup_scene))
-        .add_systems(
-            Update,
-            ((keyboard_input, mouse_input), on_resize, render).chain(),
-        )
+        .add_systems(Update, ((keyboard_input, mouse_input), render).chain())
         .run();
 }
 
@@ -124,7 +123,12 @@ fn init_rendering(
     let wrapper = holder.0.lock().unwrap();
     let handles = (wrapper.as_ref()).expect("No window found");
 
-    let vulkan_state = VulkanState::new(handles.get_display_handle(), handles.get_window_handle());
+    let mut vulkan_state = VulkanState::new(
+        handles.get_display_handle(),
+        handles.get_window_handle(),
+        window.width() as u32,
+        window.height() as u32,
+    );
 
     let mut asset_manager = AssetManager::new(
         &vulkan_state.device,
@@ -132,18 +136,18 @@ fn init_rendering(
         &vulkan_state.debug_utils_device,
     );
 
-    let shader = Shader::new(vulkan_state.device.clone(), "shaders-spv/test.spv").unwrap();
+    let shader = Shader::new(vulkan_state.device.clone(), "spv/test.spv").unwrap();
 
     let pipeline_layout = unsafe {
         vulkan_state
             .device
             .create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&[
-                    vk::PushConstantRange::default()
+                &vk::PipelineLayoutCreateInfo::default()
+                    .push_constant_ranges(&[vk::PushConstantRange::default()
                         .stage_flags(vk::ShaderStageFlags::ALL_GRAPHICS)
                         .offset(0)
-                        .size(128),
-                ]),
+                        .size(size_of::<PushConstant>() as u32)])
+                    .set_layouts(&[vulkan_state.resource_manager.descriptor_layout]),
                 None,
             )
             .unwrap()
@@ -217,16 +221,17 @@ fn init_rendering(
 
     commands.insert_resource(RenderingRes {
         device: vulkan_state.device.clone(),
-        depth_buffer: Image::new(
-            vulkan_state.device.clone(),
-            vulkan_state.allocator.clone(),
-            vk::Extent3D::default()
-                .width(window.size().x as u32)
-                .height(window.size().y as u32)
-                .depth(1),
+        depth_buffer: vulkan_state.resource_manager.create_image(
+            ImageSize::Scaled(1.0, 1.0),
             vk::Format::D32_SFLOAT,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            vk::ImageType::TYPE_2D,
+            1,
+            1,
+        ),
+        intermediary: vulkan_state.resource_manager.create_image(
+            ImageSize::Scaled(1.0, 1.0),
+            vk::Format::R16G16B16_SFLOAT,
+            vk::ImageUsageFlags::STORAGE,
             1,
             1,
         ),
@@ -240,37 +245,12 @@ fn init_rendering(
         .unwrap(),
         pipeline_layout,
         pipeline,
-        last_frame_check: Instant::now(),
+        last_frame_time: Instant::now(),
         frame: 0,
     });
 
     commands.insert_resource(asset_manager);
     commands.insert_resource(vulkan_state);
-}
-
-fn on_resize(
-    vk_state: Res<VulkanState>,
-    mut render_res: ResMut<RenderingRes>,
-    mut resize_reader: MessageReader<WindowResized>,
-) {
-    for e in resize_reader.read() {
-        unsafe {
-            vk_state.device.device_wait_idle().unwrap();
-        };
-        render_res.depth_buffer = Image::new(
-            vk_state.device.clone(),
-            vk_state.allocator.clone(),
-            vk::Extent3D::default()
-                .width(e.width as u32)
-                .height(e.height as u32)
-                .depth(1),
-            vk::Format::D32_SFLOAT,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            vk::ImageType::TYPE_2D,
-            1,
-            1,
-        );
-    }
 }
 
 fn keyboard_input(
@@ -319,16 +299,14 @@ fn mouse_input(
 fn render(
     mut vk_state: ResMut<VulkanState>,
     mut rendering_res: ResMut<RenderingRes>,
-    asset_manager: Res<AssetManager>,
     camera: Single<(&Transform, &Camera)>,
     mut window: Single<&mut Window>,
-    time: Res<Time>,
 ) {
-    let start = Instant::now();
     if !vk_state.start_frame(window.width() as u32, window.height() as u32) {
         return;
     }
 
+    let command_buffer = vk_state.get_command_buffer();
     let camera_transform = camera.0;
     let camera_data = camera.1;
     let view_projection = camera_data
@@ -336,7 +314,6 @@ fn render(
         * camera_transform.to_matrix().inverse();
 
     let device = vk_state.device.clone();
-    let command_buffer = vk_state.get_command_buffer();
 
     vk_state.current_image().transition_from_undefined(
         command_buffer,
@@ -346,16 +323,19 @@ fn render(
         vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
     );
-    rendering_res.depth_buffer.transition_from_undefined(
-        command_buffer,
-        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-    );
+    vk_state
+        .resource_manager
+        .get_image_mut(&rendering_res.depth_buffer)
+        .transition_from_undefined(
+            command_buffer,
+            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+        );
 
     unsafe {
         device.cmd_set_viewport(
@@ -398,7 +378,12 @@ fn render(
                     })])
                 .depth_attachment(
                     &vk::RenderingAttachmentInfo::default()
-                        .image_view(rendering_res.depth_buffer.view)
+                        .image_view(
+                            vk_state
+                                .resource_manager
+                                .get_image_mut(&rendering_res.depth_buffer)
+                                .view,
+                        )
                         .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
                         .load_op(vk::AttachmentLoadOp::CLEAR)
                         .store_op(vk::AttachmentStoreOp::STORE)
@@ -406,6 +391,15 @@ fn render(
                             depth_stencil: vk::ClearDepthStencilValue::default().depth(1.0),
                         }),
                 ),
+        );
+
+        device.cmd_bind_descriptor_sets(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            rendering_res.pipeline_layout,
+            0,
+            &[vk_state.resource_manager.descriptor_set],
+            &[],
         );
 
         let node_ids = match &rendering_res.gltf.scenes {
@@ -468,9 +462,9 @@ fn render(
     vk_state.end_frame(command_buffer);
 
     if rendering_res.frame.is_multiple_of(100) {
-        let elapsed = rendering_res.last_frame_check.elapsed().as_secs_f32();
+        let elapsed = rendering_res.last_frame_time.elapsed().as_secs_f32();
         window.title = format!("Vulkan Rust, FPS: {}", 100.0 / elapsed);
-        rendering_res.last_frame_check = Instant::now();
+        rendering_res.last_frame_time = Instant::now();
     }
     rendering_res.frame += 1
 }

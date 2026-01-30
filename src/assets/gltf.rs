@@ -7,23 +7,22 @@ use std::{
 };
 
 use ash::{ext::debug_utils, vk};
-use bevy::{
-    ecs::system::Commands,
-    math::{Mat4, Quat, Vec3},
-};
-use vk_mem::Allocator;
+use bevy::math::{Mat4, Quat, Vec3};
 
 use crate::{
     assets::{
         asset_manager::AssetManager,
         model::{Model, ModelData},
     },
-    rendering::buffer::Buffer,
+    rendering::{
+        buffer::Buffer,
+        wrappers::{allocator::Allocator, device::Device},
+    },
 };
 
 #[derive(Debug)]
 pub enum Error {
-    IO(std::io::ErrorKind),
+    IO,
     Utf8,
     EndOfFile,
     InvalidFileType,
@@ -41,7 +40,7 @@ impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
         match value.kind() {
             std::io::ErrorKind::UnexpectedEof => Self::EndOfFile,
-            kind => Self::IO(kind),
+            _ => Self::IO,
         }
     }
 }
@@ -69,8 +68,6 @@ impl types::Node {
             Vec3::from_slice(&self.translation),
         )
     }
-
-    pub fn spawn(&self, mut commands: Commands) {}
 }
 
 fn read_u32<R: Read>(reader: &mut R) -> Result<u32, Error> {
@@ -94,7 +91,7 @@ pub struct Gltf {
 
 impl Gltf {
     pub fn from_glb<R: Read + Seek>(
-        device: &ash::Device,
+        device: &Arc<Device>,
         allocator: &Arc<Allocator>,
         debug_utils_device: &debug_utils::Device,
         asset_manager: &mut AssetManager,
@@ -189,7 +186,7 @@ impl Gltf {
     }
 
     fn load_primitive(
-        device: &ash::Device,
+        device: &Arc<Device>,
         allocator: &Arc<Allocator>,
         debug_utils_device: &debug_utils::Device,
         asset_manager: &mut AssetManager,
@@ -248,7 +245,6 @@ impl Gltf {
         let (indices, indices_count, index_type) = match primitive.indices {
             Some(indices) => {
                 let accessor = &info.accessors[indices as usize];
-                println!("count: {}", accessor.count);
                 (
                     Self::load_buffer(
                         device,
@@ -270,7 +266,7 @@ impl Gltf {
             }
             None => {
                 let mut indices = Buffer::new(
-                    device.clone(),
+                    device,
                     allocator.clone(),
                     vk::BufferUsageFlags::INDEX_BUFFER,
                     positions_count as u64,
@@ -300,7 +296,7 @@ impl Gltf {
     }
 
     fn load_buffer(
-        device: &ash::Device,
+        device: &Arc<Device>,
         allocator: &Arc<Allocator>,
         debug_utils_device: &debug_utils::Device,
         info: &types::Info,
@@ -359,12 +355,7 @@ impl Gltf {
             None => vec![0u8; byte_length],
         };
 
-        let mut buffer = Buffer::new(
-            device.clone(),
-            allocator.clone(),
-            buffer_usage,
-            byte_length as u64,
-        );
+        let mut buffer = Buffer::new(device, allocator.clone(), buffer_usage, byte_length as u64);
         buffer.set_name(debug_utils_device, name);
         buffer.write(&data, 0);
         Ok(buffer)

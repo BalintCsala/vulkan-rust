@@ -1,14 +1,16 @@
-use std::fs::File;
+use std::{fs::File, sync::Arc};
 
 use ash::{util::read_spv, vk};
 
+use crate::rendering::wrappers::device::Device;
+
 pub struct Shader {
-    device: ash::Device,
+    device: Arc<Device>,
     pub module: vk::ShaderModule,
 }
 
 impl Shader {
-    pub fn new(device: ash::Device, path: &str) -> Result<Self, std::io::Error> {
+    pub fn new(device: Arc<Device>, path: &str) -> Result<Self, std::io::Error> {
         let mut file = File::open(path)?;
         let code = read_spv(&mut file)?;
         let module = unsafe {

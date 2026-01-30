@@ -6,25 +6,84 @@ use ash::{
     vk,
 };
 use bevy::ecs::resource::Resource;
-use vk_mem::{Allocator, AllocatorCreateFlags, AllocatorCreateInfo};
+use vk_mem::{AllocatorCreateFlags, AllocatorCreateInfo};
 use winit::raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::rendering::{
-    command_cache::CommandCache, image::Image, vulkan_utils::assign_debug_name,
+    command_cache::CommandCache,
+    image::Image,
+    resource_manager::ResourceManager,
+    vulkan_utils::assign_debug_name,
+    wrappers::{allocator::Allocator, device::Device, instance::Instance},
 };
 
 const FRAMES_IN_FLIGHT: usize = 3;
 
 pub enum Deletable {
     Droppable(Box<dyn Send + Sync>),
-    Callback(Box<dyn FnOnce(&ash::Device) + Send + Sync>),
+    Callback(Box<dyn FnOnce(&Arc<Device>) + Send + Sync>),
 }
 
 struct FrameData {
+    device: Arc<Device>,
     fence: vk::Fence,
     command_cache: CommandCache,
     image_acquired: vk::Semaphore,
     deletion_queue: Vec<Deletable>,
+}
+
+impl FrameData {
+    pub fn new(
+        device: Arc<Device>,
+        debug_utils_device: &debug_utils::Device,
+        frame_id: usize,
+    ) -> Self {
+        let fence = unsafe {
+            device
+                .create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
+                .unwrap()
+        };
+        assign_debug_name(
+            &debug_utils_device,
+            fence,
+            &format!("Frame fence #{}", frame_id),
+        );
+
+        let image_acquired = unsafe {
+            device
+                .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                .unwrap()
+        };
+        assign_debug_name(
+            debug_utils_device,
+            image_acquired,
+            &format!("Image acquired semaphore #{}", frame_id),
+        );
+
+        let command_cache = CommandCache::new(device.clone());
+
+        Self {
+            device,
+            fence,
+            image_acquired,
+            command_cache,
+            deletion_queue: Vec::new(),
+        }
+    }
+}
+
+impl Drop for FrameData {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_fence(self.fence, None);
+        };
+        unsafe {
+            self.device.destroy_semaphore(self.image_acquired, None);
+        };
+    }
 }
 
 struct SwapchainImageData {
@@ -35,9 +94,9 @@ struct SwapchainImageData {
 #[derive(Resource)]
 pub struct VulkanState {
     _entry: ash::Entry,
-    _instance: ash::Instance,
+    _instance: Arc<Instance>,
     _physical_device: vk::PhysicalDevice,
-    pub device: ash::Device,
+    pub device: Arc<Device>,
     queue: vk::Queue,
 
     surface_instance: surface::Instance,
@@ -57,31 +116,34 @@ pub struct VulkanState {
 
     pub allocator: Arc<Allocator>,
 
-    pub debug_utils_device: debug_utils::Device,
+    pub resource_manager: ResourceManager,
 
-    frame: u32,
+    pub debug_utils_device: debug_utils::Device,
 }
 
 impl VulkanState {
-    pub fn new(display_handle: RawDisplayHandle, window_handle: RawWindowHandle) -> Self {
+    pub fn new(
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let entry = ash::Entry::linked();
 
-        let instance = unsafe {
+        let instance = {
             let mut extensions = ash_window::enumerate_required_extensions(display_handle)
                 .unwrap()
                 .to_vec();
             extensions.push(debug_utils::NAME.as_ptr());
 
-            entry
-                .create_instance(
-                    &vk::InstanceCreateInfo::default()
-                        .application_info(
-                            &vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3),
-                        )
-                        .enabled_extension_names(&extensions),
-                    None,
-                )
-                .unwrap()
+            Arc::new(Instance::new(
+                &entry,
+                &vk::InstanceCreateInfo::default()
+                    .application_info(
+                        &vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3),
+                    )
+                    .enabled_extension_names(&extensions),
+            ))
         };
 
         let surface_instance = surface::Instance::new(&entry, &instance);
@@ -132,36 +194,38 @@ impl VulkanState {
         };
         let min_image_count = surface_capabilities.min_image_count + 5;
 
-        let device = unsafe {
-            instance
-                .create_device(
-                    physical_device,
-                    &vk::DeviceCreateInfo::default()
-                        .queue_create_infos(&[vk::DeviceQueueCreateInfo::default()
-                            .queue_family_index(0)
-                            .queue_priorities(&[1.0])])
-                        .enabled_extension_names(&[swapchain::NAME.as_ptr()])
-                        .push_next(
-                            &mut vk::PhysicalDeviceFeatures2::default()
-                                .features(vk::PhysicalDeviceFeatures::default()),
-                        )
-                        .push_next(
-                            &mut vk::PhysicalDeviceVulkan11Features::default()
-                                .shader_draw_parameters(true),
-                        )
-                        .push_next(
-                            &mut vk::PhysicalDeviceVulkan12Features::default()
-                                .buffer_device_address(true),
-                        )
-                        .push_next(
-                            &mut vk::PhysicalDeviceVulkan13Features::default()
-                                .synchronization2(true)
-                                .dynamic_rendering(true),
-                        ),
-                    None,
+        let device = Arc::new(Device::new(
+            instance.clone(),
+            &physical_device,
+            &vk::DeviceCreateInfo::default()
+                .queue_create_infos(&[vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(0)
+                    .queue_priorities(&[1.0])])
+                .enabled_extension_names(&[swapchain::NAME.as_ptr()])
+                .push_next(
+                    &mut vk::PhysicalDeviceFeatures2::default()
+                        .features(vk::PhysicalDeviceFeatures::default()),
                 )
-                .unwrap()
-        };
+                .push_next(
+                    &mut vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true),
+                )
+                .push_next(
+                    &mut vk::PhysicalDeviceVulkan12Features::default()
+                        .buffer_device_address(true)
+                        .descriptor_indexing(true)
+                        .runtime_descriptor_array(true)
+                        .descriptor_binding_partially_bound(true)
+                        .shader_sampled_image_array_non_uniform_indexing(true)
+                        .shader_storage_image_array_non_uniform_indexing(true)
+                        .descriptor_binding_sampled_image_update_after_bind(true)
+                        .descriptor_binding_storage_image_update_after_bind(true),
+                )
+                .push_next(
+                    &mut vk::PhysicalDeviceVulkan13Features::default()
+                        .synchronization2(true)
+                        .dynamic_rendering(true),
+                ),
+        ));
 
         let queue = unsafe {
             device.get_device_queue2(
@@ -173,57 +237,33 @@ impl VulkanState {
 
         let debug_utils_device = debug_utils::Device::new(&instance, &device);
 
-        let allocator = unsafe {
+        let allocator = {
             let mut create_info = AllocatorCreateInfo::new(&instance, &device, physical_device);
             create_info.flags = AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
-            Allocator::new(create_info).unwrap()
+
+            Arc::new(Allocator::new(device.clone(), create_info))
         };
 
         let swapchain_device = swapchain::Device::new(&instance, &device);
 
         let frames = (0..FRAMES_IN_FLIGHT)
-            .map(|id| {
-                let fence = unsafe {
-                    device
-                        .create_fence(
-                            &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
-                            None,
-                        )
-                        .unwrap()
-                };
-                assign_debug_name(&debug_utils_device, fence, &format!("Frame fence #{}", id));
-
-                let image_acquired = unsafe {
-                    device
-                        .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                        .unwrap()
-                };
-                assign_debug_name(
-                    &debug_utils_device,
-                    image_acquired,
-                    &format!("Image acquired semaphore #{}", id),
-                );
-
-                FrameData {
-                    fence,
-                    image_acquired,
-                    command_cache: CommandCache::new(&device),
-                    deletion_queue: Vec::new(),
-                }
-            })
+            .map(|frame_id| FrameData::new(device.clone(), &debug_utils_device, frame_id))
             .collect();
+
+        let extent = vk::Extent2D::default().width(width).height(height);
+        let resource_manager = ResourceManager::new(device.clone(), allocator.clone(), extent);
 
         Self {
             _entry: entry,
             _instance: instance,
             surface_instance,
             surface,
-            extent: vk::Extent2D::default().width(0).height(0),
+            extent,
             _physical_device: physical_device,
             device,
             queue,
             debug_utils_device,
-            allocator: Arc::new(allocator),
+            allocator,
             swapchain: None,
             swapchain_device,
             images: Vec::new(),
@@ -233,14 +273,13 @@ impl VulkanState {
             present_mode,
             surface_format,
             min_image_count,
-            frame: 0,
+            resource_manager,
         }
     }
 
     fn create_swapchain(&mut self) {
-        println!("Creating swapchain");
         unsafe {
-            self.device.queue_wait_idle(self.queue).unwrap();
+            self.device.device_wait_idle().unwrap();
         };
         let semaphores: Vec<_> = if !self.images.is_empty() {
             self.images
@@ -319,7 +358,7 @@ impl VulkanState {
             .push(Deletable::Droppable(Box::new(obj)));
     }
 
-    pub fn queue_callback_for_deletion<T: FnMut(&ash::Device) + Send + Sync + 'static>(
+    pub fn queue_callback_for_deletion<T: FnMut(&Arc<Device>) + Send + Sync + 'static>(
         &mut self,
         callback: T,
     ) {
@@ -357,6 +396,7 @@ impl VulkanState {
         if self.swapchain.is_none() || width != self.extent.width || height != self.extent.height {
             self.extent = vk::Extent2D::default().width(width).height(height);
             self.create_swapchain();
+            self.resource_manager.resize(width, height);
         }
         let swapchain = self.swapchain.unwrap();
         unsafe {
@@ -436,7 +476,6 @@ impl VulkanState {
                 Deletable::Callback(callback) => callback(&self.device),
             }
         }
-        self.frame += 1;
     }
 }
 
@@ -444,23 +483,21 @@ impl Drop for VulkanState {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+        }
 
-            self.frames.iter().for_each(|frame_data| {
-                self.device.destroy_fence(frame_data.fence, None);
-                self.device
-                    .destroy_semaphore(frame_data.image_acquired, None);
-            });
-            self.frames.clear();
+        self.frames.clear();
 
-            self.images.iter().for_each(|image_data| {
-                self.device
-                    .destroy_semaphore(image_data.rendering_finished, None);
-            });
-            self.images.clear();
+        self.images.drain(..).for_each(|image_data| unsafe {
+            self.device
+                .destroy_semaphore(image_data.rendering_finished, None);
+        });
 
-            if let Some(swapchain) = self.swapchain {
+        if let Some(swapchain) = self.swapchain {
+            unsafe {
                 self.swapchain_device.destroy_swapchain(swapchain, None);
             }
+        }
+        unsafe {
             self.surface_instance.destroy_surface(self.surface, None);
         }
     }

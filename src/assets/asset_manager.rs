@@ -2,9 +2,14 @@ use std::sync::Arc;
 
 use ash::{ext::debug_utils, vk};
 use bevy::ecs::resource::Resource;
-use vk_mem::Allocator;
 
-use crate::{assets::model::ModelData, rendering::buffer::Buffer};
+use crate::{
+    assets::model::ModelData,
+    rendering::{
+        buffer::Buffer,
+        wrappers::{allocator::Allocator, device::Device},
+    },
+};
 
 const MAX_MODEL_DATA_COUNT: usize = 16384;
 
@@ -16,12 +21,12 @@ pub struct AssetManager {
 
 impl AssetManager {
     pub fn new(
-        device: &ash::Device,
+        device: &Arc<Device>,
         allocator: &Arc<Allocator>,
         debug_utils_device: &debug_utils::Device,
     ) -> Self {
         let model_datas = Buffer::new(
-            device.clone(),
+            device,
             allocator.clone(),
             vk::BufferUsageFlags::empty(),
             (MAX_MODEL_DATA_COUNT * size_of::<ModelData>()) as u64,

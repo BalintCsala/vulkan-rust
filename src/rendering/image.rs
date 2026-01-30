@@ -1,25 +1,26 @@
 use std::sync::Arc;
 
 use ash::vk;
-use vk_mem::{Alloc, Allocation, AllocationCreateInfo, Allocator};
+use vk_mem::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, MemoryUsage};
 
-use crate::rendering::vulkan_utils::{
-    format_to_aspect, full_subresource_range, image_type_to_view_type,
+use crate::rendering::{
+    vulkan_utils::{format_to_aspect, full_subresource_range, image_type_to_view_type},
+    wrappers::{allocator::Allocator, device::Device},
 };
 
 pub struct Image {
-    device: ash::Device,
-    allocator: Option<Arc<Allocator>>,
-    pub handle: vk::Image,
-    pub view: vk::ImageView,
-    allocation: Option<Allocation>,
     layout: vk::ImageLayout,
     format: vk::Format,
+    pub view: vk::ImageView,
+    allocation: Option<Allocation>,
+    pub handle: vk::Image,
+    allocator: Option<Arc<Allocator>>,
+    device: Arc<Device>,
 }
 
 impl Image {
     pub fn new(
-        device: ash::Device,
+        device: Arc<Device>,
         allocator: Arc<Allocator>,
         extent: vk::Extent3D,
         format: vk::Format,
@@ -33,7 +34,6 @@ impl Image {
                 .create_image(
                     &vk::ImageCreateInfo::default()
                         .extent(extent)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
                         .tiling(vk::ImageTiling::OPTIMAL)
                         .mip_levels(mip_levels)
                         .image_type(image_type)
@@ -41,7 +41,13 @@ impl Image {
                         .usage(usage)
                         .array_layers(array_layers)
                         .samples(vk::SampleCountFlags::TYPE_1),
-                    &AllocationCreateInfo::default(),
+                    &AllocationCreateInfo {
+                        flags: AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                            | AllocationCreateFlags::HOST_ACCESS_ALLOW_TRANSFER_INSTEAD
+                            | AllocationCreateFlags::MAPPED,
+                        usage: MemoryUsage::Auto,
+                        ..Default::default()
+                    },
                 )
                 .unwrap()
         };
@@ -72,7 +78,7 @@ impl Image {
     }
 
     pub fn from_raw(
-        device: ash::Device,
+        device: Arc<Device>,
         image: vk::Image,
         format: vk::Format,
         layout: vk::ImageLayout,
@@ -178,11 +184,11 @@ impl Drop for Image {
             self.device.destroy_image_view(self.view, None);
         }
 
-        if let (Some(allocator), Some(allocation)) =
-            (self.allocator.as_ref(), self.allocation.as_mut())
+        if let (Some(allocator), Some(mut allocation)) =
+            (self.allocator.as_ref(), self.allocation.take())
         {
             unsafe {
-                allocator.destroy_image(self.handle, allocation);
+                allocator.destroy_image(self.handle, &mut allocation);
             };
         }
     }

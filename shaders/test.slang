@@ -29,5 +29,6 @@ VSOut vs(uint id: SV_VertexID, uniform PushConstants pushConstants) {
 
 [shader("fragment")]
 float4 fs(VSOut input) {
+    return 0.0;
     return float4(input.color, 1.0);
 }

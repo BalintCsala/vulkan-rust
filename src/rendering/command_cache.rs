@@ -1,16 +1,20 @@
-use ash::{Device, vk};
+use std::sync::Arc;
+
+use ash::vk;
+
+use crate::rendering::wrappers::device::Device;
 
 const INITIAL_COMMAND_BUFFER_COUNT: u32 = 8;
 
 pub struct CommandCache {
-    device: Device,
+    device: Arc<Device>,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     next_id: usize,
 }
 
 impl CommandCache {
-    pub fn new(device: &Device) -> Self {
+    pub fn new(device: Arc<Device>) -> Self {
         let command_pool = unsafe {
             device
                 .create_command_pool(&vk::CommandPoolCreateInfo::default(), None)
@@ -29,7 +33,7 @@ impl CommandCache {
         };
 
         Self {
-            device: device.clone(),
+            device,
             command_pool,
             command_buffers,
             next_id: 0,
@@ -66,6 +70,12 @@ impl CommandCache {
 
 impl Drop for CommandCache {
     fn drop(&mut self) {
+        unsafe {
+            self.device.free_command_buffers(
+                self.command_pool,
+                &self.command_buffers.drain(..).collect::<Vec<_>>(),
+            );
+        };
         unsafe {
             self.device.destroy_command_pool(self.command_pool, None);
         };
