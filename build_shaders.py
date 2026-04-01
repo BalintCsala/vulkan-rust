@@ -10,6 +10,9 @@ except:
 
 SLANGC_COMMAND = "slangc" if len(sys.argv) == 1 else sys.argv[1]
 
-for file in os.listdir("shaders"):
-    subprocess.run([SLANGC_COMMAND, f"shaders/{file}", "-fvk-use-c-layout", "-fvk-use-entrypoint-name", "-o", f"spv/{file.replace(".slang", ".spv")}"])
+for name in os.listdir("shaders"):
+    path = f"shaders/{name}"
+    if os.path.isdir(path):
+        continue
+    subprocess.run([SLANGC_COMMAND, path, "-fvk-use-c-layout", "-fvk-use-entrypoint-name", "-o", f"spv/{name.replace(".slang", ".spv")}"])
 

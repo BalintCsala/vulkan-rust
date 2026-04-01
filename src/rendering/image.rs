@@ -1,16 +1,18 @@
 use std::sync::Arc;
 
-use ash::vk;
+use ash::{ext::debug_utils, vk};
 use vk_mem::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, MemoryUsage};
 
 use crate::rendering::{
-    vulkan_utils::{format_to_aspect, full_subresource_range, image_type_to_view_type},
+    vulkan_utils::{
+        assign_debug_name, format_to_aspect, full_subresource_range, image_type_to_view_type,
+    },
     wrappers::{allocator::Allocator, device::Device},
 };
 
 pub struct Image {
-    layout: vk::ImageLayout,
-    format: vk::Format,
+    pub layout: vk::ImageLayout,
+    pub format: vk::Format,
     pub view: vk::ImageView,
     allocation: Option<Allocation>,
     pub handle: vk::Image,
@@ -22,12 +24,14 @@ impl Image {
     pub fn new(
         device: Arc<Device>,
         allocator: Arc<Allocator>,
+        debug_utils_device: &debug_utils::Device,
         extent: vk::Extent3D,
         format: vk::Format,
         usage: vk::ImageUsageFlags,
         image_type: vk::ImageType,
         mip_levels: u32,
         array_layers: u32,
+        name: &str,
     ) -> Self {
         let (image, allocation) = unsafe {
             allocator
@@ -40,17 +44,19 @@ impl Image {
                         .format(format)
                         .usage(usage)
                         .array_layers(array_layers)
+                        .initial_layout(vk::ImageLayout::UNDEFINED)
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
                         .samples(vk::SampleCountFlags::TYPE_1),
                     &AllocationCreateInfo {
-                        flags: AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
-                            | AllocationCreateFlags::HOST_ACCESS_ALLOW_TRANSFER_INSTEAD
-                            | AllocationCreateFlags::MAPPED,
+                        flags: AllocationCreateFlags::DEDICATED_MEMORY,
                         usage: MemoryUsage::Auto,
                         ..Default::default()
                     },
                 )
                 .unwrap()
         };
+
+        assign_debug_name(debug_utils_device, image, name);
 
         let view = unsafe {
             device
@@ -65,6 +71,8 @@ impl Image {
                 )
                 .unwrap()
         };
+
+        assign_debug_name(debug_utils_device, image, &format!("{name} main view"));
 
         Self {
             device,
@@ -108,14 +116,34 @@ impl Image {
         }
     }
 
-    fn transition_impl(
+    pub fn get_transition_barrier<'a>(
+        &mut self,
+        src_stage: vk::PipelineStageFlags2,
+        src_access: vk::AccessFlags2,
+        dst_stage: vk::PipelineStageFlags2,
+        dst_access: vk::AccessFlags2,
+        new_layout: vk::ImageLayout,
+    ) -> vk::ImageMemoryBarrier2<'a> {
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .image(self.handle)
+            .subresource_range(full_subresource_range(format_to_aspect(self.format)))
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(dst_stage)
+            .dst_access_mask(dst_access)
+            .old_layout(self.layout)
+            .new_layout(new_layout);
+        self.layout = new_layout;
+        barrier
+    }
+
+    pub fn immediate_transition(
         &mut self,
         command_buffer: vk::CommandBuffer,
         src_stage: vk::PipelineStageFlags2,
         src_access: vk::AccessFlags2,
         dst_stage: vk::PipelineStageFlags2,
         dst_access: vk::AccessFlags2,
-        old_layout: vk::ImageLayout,
         new_layout: vk::ImageLayout,
     ) {
         unsafe {
@@ -129,52 +157,41 @@ impl Image {
                         .src_access_mask(src_access)
                         .dst_stage_mask(dst_stage)
                         .dst_access_mask(dst_access)
-                        .old_layout(old_layout)
+                        .old_layout(self.layout)
+                        .new_layout(new_layout),
+                ]),
+            );
+        };
+
+        self.layout = new_layout;
+    }
+
+    pub fn immediate_transition_from_undefined(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        src_stage: vk::PipelineStageFlags2,
+        src_access: vk::AccessFlags2,
+        dst_stage: vk::PipelineStageFlags2,
+        dst_access: vk::AccessFlags2,
+        new_layout: vk::ImageLayout,
+    ) {
+        unsafe {
+            self.device.cmd_pipeline_barrier2(
+                command_buffer,
+                &vk::DependencyInfo::default().image_memory_barriers(&[
+                    vk::ImageMemoryBarrier2::default()
+                        .image(self.handle)
+                        .subresource_range(full_subresource_range(format_to_aspect(self.format)))
+                        .src_stage_mask(src_stage)
+                        .src_access_mask(src_access)
+                        .dst_stage_mask(dst_stage)
+                        .dst_access_mask(dst_access)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
                         .new_layout(new_layout),
                 ]),
             );
         };
         self.layout = new_layout;
-    }
-
-    pub fn transition(
-        &mut self,
-        command_buffer: vk::CommandBuffer,
-        src_stage: vk::PipelineStageFlags2,
-        src_access: vk::AccessFlags2,
-        dst_stage: vk::PipelineStageFlags2,
-        dst_access: vk::AccessFlags2,
-        new_layout: vk::ImageLayout,
-    ) {
-        self.transition_impl(
-            command_buffer,
-            src_stage,
-            src_access,
-            dst_stage,
-            dst_access,
-            self.layout,
-            new_layout,
-        );
-    }
-
-    pub fn transition_from_undefined(
-        &mut self,
-        command_buffer: vk::CommandBuffer,
-        src_stage: vk::PipelineStageFlags2,
-        src_access: vk::AccessFlags2,
-        dst_stage: vk::PipelineStageFlags2,
-        dst_access: vk::AccessFlags2,
-        new_layout: vk::ImageLayout,
-    ) {
-        self.transition_impl(
-            command_buffer,
-            src_stage,
-            src_access,
-            dst_stage,
-            dst_access,
-            vk::ImageLayout::UNDEFINED,
-            new_layout,
-        );
     }
 }
 

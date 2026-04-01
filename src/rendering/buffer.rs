@@ -8,6 +8,7 @@ use crate::rendering::{
     wrappers::{allocator::Allocator, device::Device},
 };
 
+#[derive(Clone)]
 pub struct Buffer {
     allocator: Arc<Allocator>,
     pub handle: vk::Buffer,
@@ -19,8 +20,10 @@ impl Buffer {
     pub fn new(
         device: &Arc<Device>,
         allocator: Arc<Allocator>,
+        debug_utils_device: &debug_utils::Device,
         usage: vk::BufferUsageFlags,
         size: u64,
+        name: &str,
     ) -> Self {
         let (buffer, allocation) = unsafe {
             allocator
@@ -40,6 +43,8 @@ impl Buffer {
                 .unwrap()
         };
 
+        assign_debug_name(debug_utils_device, buffer, name);
+
         let address = unsafe {
             device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
         };
@@ -50,20 +55,6 @@ impl Buffer {
             allocation: Some(allocation),
             address,
         }
-    }
-
-    pub fn set_name(&self, debug_utils_device: &debug_utils::Device, name: &str) {
-        assign_debug_name(
-            debug_utils_device,
-            self.allocator
-                .get_allocation_info(
-                    self.allocation
-                        .as_ref()
-                        .expect("Buffer was already destroyed"),
-                )
-                .device_memory,
-            name,
-        );
     }
 
     pub fn write<T>(&mut self, data: &[T], offset: usize) {

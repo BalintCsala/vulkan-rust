@@ -55,7 +55,19 @@ impl CommandCache {
             self.command_buffers.append(&mut new_command_buffers);
         }
         self.next_id += 1;
-        self.command_buffers[self.next_id - 1]
+        let command_buffer = self.command_buffers[self.next_id - 1];
+
+        unsafe {
+            self.device
+                .begin_command_buffer(
+                    command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .unwrap();
+        }
+
+        command_buffer
     }
 
     pub fn reset(&mut self) {

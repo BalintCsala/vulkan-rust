@@ -1,21 +1,25 @@
 pub mod types;
 
 use std::{
-    io::{Read, Seek},
+    collections::HashMap,
+    io::{Cursor, Read, Seek},
     str::Utf8Error,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    thread,
 };
 
 use ash::{ext::debug_utils, vk};
-use bevy::math::{Mat4, Quat, Vec3};
+use bevy::{
+    math::{Mat4, Quat, Vec3},
+    platform::collections::HashSet,
+};
+use image::{ImageError, ImageFormat, ImageReader};
 
 use crate::{
-    assets::{
-        asset_manager::AssetManager,
-        model::{Model, ModelData},
-    },
+    assets::model::{Model, ModelData},
     rendering::{
         buffer::Buffer,
+        resource_manager::{ImageReference, ResourceManager},
         wrappers::{allocator::Allocator, device::Device},
     },
 };
@@ -26,14 +30,15 @@ pub enum Error {
     Utf8,
     EndOfFile,
     InvalidFileType,
-    InvalidVersion,
+    UnsupportedVersion,
     MissingJSONChunk,
     MissingBinChunk,
-    JSONParse,
+    JSONParse(serde_json::Error),
     NoSceneNodes,
     MissingRequiredAttribute,
     InvalidAttribute,
     InvalidIndexType,
+    ImageError,
 }
 
 impl From<std::io::Error> for Error {
@@ -52,8 +57,14 @@ impl From<Utf8Error> for Error {
 }
 
 impl From<serde_json::Error> for Error {
-    fn from(_: serde_json::Error) -> Self {
-        Error::JSONParse
+    fn from(err: serde_json::Error) -> Self {
+        Error::JSONParse(err)
+    }
+}
+
+impl From<ImageError> for Error {
+    fn from(_value: ImageError) -> Self {
+        Error::ImageError
     }
 }
 
@@ -84,7 +95,7 @@ pub struct Gltf {
     _buffers: Vec<Buffer>,
     pub primitives: Vec<Model>,
     pub meshes: Vec<Mesh>,
-    pub scene: Option<u32>,
+    pub scene: Option<usize>,
     pub scenes: Option<Vec<types::Scene>>,
     pub nodes: Vec<types::Node>,
 }
@@ -94,7 +105,7 @@ impl Gltf {
         device: &Arc<Device>,
         allocator: &Arc<Allocator>,
         debug_utils_device: &debug_utils::Device,
-        asset_manager: &mut AssetManager,
+        resource_manager: &mut ResourceManager,
         reader: &mut R,
     ) -> Result<Self, Error> {
         let magic = read_u32(reader)?;
@@ -104,7 +115,7 @@ impl Gltf {
 
         let version = read_u32(reader)?;
         if version != 2 {
-            return Err(Error::InvalidVersion);
+            return Err(Error::UnsupportedVersion);
         }
 
         let _length = read_u32(reader);
@@ -124,7 +135,19 @@ impl Gltf {
             match chunk_type {
                 0x4E4F534A => {
                     // JSON
-                    info = Some(serde_json::from_slice(chunk_data.as_slice())?);
+                    let result = serde_json::from_slice(chunk_data.as_slice());
+                    if let Err(err) = &result {
+                        eprintln!("Json parse error:");
+                        eprintln!(
+                            "{}",
+                            String::from_utf8(
+                                chunk_data[err.column() - 15..err.column() + 50].to_vec()
+                            )
+                            .unwrap()
+                        );
+                        eprintln!("{}^", " ".repeat(15));
+                    }
+                    info = Some(result?);
                 }
                 0x004E4942 => {
                     // BIN
@@ -144,6 +167,93 @@ impl Gltf {
             None => return Err(Error::MissingBinChunk),
         };
 
+        let mut srgb_textures = HashSet::new();
+        if let Some(nodes) = &info.nodes
+            && let Some(meshes) = &info.meshes
+            && let Some(materials) = &info.materials
+        {
+            for node in nodes {
+                if let Some(mesh) = node.mesh {
+                    for primitive in &meshes[mesh].primitives {
+                        if let Some(material) = primitive.material
+                            && let Some(pbr_metallic_roughness) =
+                                &materials[material].pbr_metallic_roughness
+                            && let Some(base_color_texture) =
+                                &pbr_metallic_roughness.base_color_texture
+                        {
+                            srgb_textures.insert(base_color_texture.index);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut image_lookup = HashMap::new();
+
+        if let Some(textures) = &info.textures
+            && let Some(images) = &info.images
+            && let Some(buffer_views) = &info.buffer_views
+        {
+            let decoded_images = Arc::new(Mutex::new(Vec::new()));
+            let bin = Arc::new(&bin);
+            thread::scope(|scope| {
+                println!("Loading textures...");
+                textures.iter().for_each(|texture| {
+                    let decoded_images = decoded_images.clone();
+                    let bin = bin.clone();
+                    scope.spawn(move || {
+                        if let Some(source) = texture.source {
+                            let image = &images[source];
+                            let buffer_view = &buffer_views[image.buffer_view.unwrap()];
+                            let offset = buffer_view.byte_offset;
+                            let data = bin[offset..offset + buffer_view.byte_length].to_vec();
+                            let mime_type = image.mime_type.as_ref().unwrap();
+                            let format = match mime_type.as_str() {
+                                "image/jpeg" => ImageFormat::Jpeg,
+                                "image/png" => ImageFormat::Png,
+                                _ => panic!("Unrecognized image format: {}", mime_type),
+                            };
+                            let mut img = ImageReader::new(Cursor::new(data));
+                            img.set_format(format);
+                            let img = img.decode().expect("Failed to decode image").into_rgba8();
+                            decoded_images.lock().unwrap().push((source, img));
+                        }
+                    });
+                });
+                println!("Finished loading textures");
+            });
+
+            let decoded_images = decoded_images.lock().unwrap();
+
+            let uploads = decoded_images
+                .iter()
+                .enumerate()
+                .map(|(i, (source, img))| {
+                    let reference = resource_manager.create_empty_image(
+                        crate::rendering::resource_manager::ImageSize::Fixed(
+                            img.width(),
+                            img.height(),
+                        ),
+                        if srgb_textures.contains(source) {
+                            vk::Format::R8G8B8A8_SRGB
+                        } else {
+                            vk::Format::R8G8B8A8_UNORM
+                        },
+                        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+                        1,
+                        1,
+                        format!("Gltf texture #{i}"),
+                    );
+                    image_lookup.insert(*source, reference);
+                    (reference, img.iter().as_slice())
+                })
+                .collect::<Vec<_>>();
+
+            resource_manager.upload_image_data(uploads.as_slice());
+            resource_manager.flush_staging();
+            println!("Finished uploading images");
+        }
+
         let mut meshes = Vec::new();
         let mut primitives = Vec::new();
         let mut buffers = Vec::new();
@@ -156,7 +266,8 @@ impl Gltf {
                         device,
                         allocator,
                         debug_utils_device,
-                        asset_manager,
+                        resource_manager,
+                        &image_lookup,
                         &info,
                         primitive,
                         &bin,
@@ -189,7 +300,8 @@ impl Gltf {
         device: &Arc<Device>,
         allocator: &Arc<Allocator>,
         debug_utils_device: &debug_utils::Device,
-        asset_manager: &mut AssetManager,
+        resource_manager: &mut ResourceManager,
+        image_lookup: &HashMap<usize, ImageReference>,
         info: &types::Info,
         primitive: &types::Primitive,
         bin: &[u8],
@@ -208,18 +320,19 @@ impl Gltf {
         let mut positions_count = 0;
 
         for (name, accessor_id) in &primitive.attributes {
-            let primitive_name = format!("{mesh_name} {name}");
-            let accessor = &info.accessors[*accessor_id as usize];
-            let buffer = Self::load_buffer(
+            let accessor = &info.accessors[*accessor_id];
+            let data = Self::load_accessor_data(info, bin, accessor)?;
+
+            let mut buffer = Buffer::new(
                 device,
-                allocator,
+                allocator.clone(),
                 debug_utils_device,
-                info,
-                bin,
-                accessor,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
-                &primitive_name,
-            )?;
+                data.len() as u64,
+                &format!("{mesh_name} {name}"),
+            );
+            buffer.write(&data, 0);
+
             match name.as_str() {
                 "POSITION" => {
                     positions = Some(buffer.address);
@@ -242,69 +355,92 @@ impl Gltf {
             _ => return Err(Error::MissingRequiredAttribute),
         };
         let indices_name = format!("{mesh_name} indices");
-        let (indices, indices_count, index_type) = match primitive.indices {
+        let (indices, index_count) = match primitive.indices {
             Some(indices) => {
-                let accessor = &info.accessors[indices as usize];
-                (
-                    Self::load_buffer(
-                        device,
-                        allocator,
-                        debug_utils_device,
-                        info,
-                        bin,
-                        accessor,
-                        vk::BufferUsageFlags::INDEX_BUFFER,
-                        &indices_name,
-                    )?,
-                    accessor.count,
-                    match accessor.component_type {
-                        5123 => vk::IndexType::UINT16,
-                        5125 => vk::IndexType::UINT32,
-                        _ => Err(Error::InvalidIndexType)?,
-                    },
-                )
+                let accessor = &info.accessors[indices];
+                let mut data = Self::load_accessor_data(info, bin, accessor)?;
+                if accessor.component_type == 5123 {
+                    // UINT16
+                    let mut inflated = Vec::with_capacity(data.len() * 2);
+                    data.chunks(2).for_each(|pair| {
+                        inflated.extend_from_slice(pair);
+                        inflated.push(0);
+                        inflated.push(0);
+                    });
+                    data = inflated;
+                }
+
+                let mut indices = Buffer::new(
+                    device,
+                    allocator.clone(),
+                    debug_utils_device,
+                    vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER,
+                    data.len() as u64,
+                    &indices_name,
+                );
+                indices.write(&data, 0);
+
+                (indices, accessor.count)
             }
             None => {
                 let mut indices = Buffer::new(
                     device,
                     allocator.clone(),
+                    debug_utils_device,
                     vk::BufferUsageFlags::INDEX_BUFFER,
                     positions_count as u64,
+                    &indices_name,
                 );
-                indices.set_name(debug_utils_device, &indices_name);
                 indices.write(Vec::from_iter(0..positions_count as u32).as_slice(), 0);
-                (indices, positions_count, vk::IndexType::UINT32)
+                (indices, positions_count)
             }
         };
 
-        let model_data = asset_manager.upload_model_data(ModelData {
-            positions,
-            normals: normals.unwrap_or(0),
-            tangents: tangents.unwrap_or(0),
-            texcoords_0: texcoords_0.unwrap_or(0),
-            texcoords_1: texcoords_1.unwrap_or(0),
-            colors: colors.unwrap_or(0),
-            joints: joints.unwrap_or(0),
-            weights: weights.unwrap_or(0),
-        });
-        Ok(Model {
-            model_data,
+        let (base_color_texture_id, base_color_texcoord_id, base_color_sampler_id) = match primitive
+            .material
+        {
+            Some(material) => match &info.materials.as_ref().unwrap()[material]
+                .pbr_metallic_roughness
+            {
+                Some(pbr_metallic_roughness) => match &pbr_metallic_roughness.base_color_texture {
+                    Some(base_color_texture) => (
+                        *image_lookup.get(&base_color_texture.index).unwrap_or(&-1),
+                        base_color_texture.tex_coord,
+                        0,
+                    ),
+                    None => (-1, 0, 0),
+                },
+                None => (-1, 0, 0),
+            },
+            None => (-1, 0, 0),
+        };
+
+        let model_ref = resource_manager.upload_model(
+            ModelData {
+                positions,
+                indices: indices.address,
+                normals: normals.unwrap_or(0),
+                tangents: tangents.unwrap_or(0),
+                texcoords_0: texcoords_0.unwrap_or(0),
+                texcoords_1: texcoords_1.unwrap_or(0),
+                colors: colors.unwrap_or(0),
+                joints: joints.unwrap_or(0),
+                weights: weights.unwrap_or(0),
+                base_color_texture_id,
+                base_color_texcoord_id,
+                base_color_sampler_id,
+            },
             indices,
-            indices_count: indices_count as u32,
-            index_type,
-        })
+            index_count as u32,
+        );
+        Ok(Model { model_ref })
     }
 
-    fn load_buffer(
-        device: &Arc<Device>,
-        allocator: &Arc<Allocator>,
-        debug_utils_device: &debug_utils::Device,
+    fn load_accessor_data(
         info: &types::Info,
         bin: &[u8],
         accessor: &types::Accessor,
-        buffer_usage: vk::BufferUsageFlags,
-        name: &str,
-    ) -> Result<Buffer, Error> {
+    ) -> Result<Vec<u8>, Error> {
         let component_byte_size: usize = match accessor.component_type {
             5120 => 1, // Signed byte
             5121 => 1, // Unsigned byte
@@ -327,14 +463,14 @@ impl Gltf {
         };
 
         let bytes_per_element = components_per_element * component_byte_size;
-        let byte_length = (accessor.count as usize) * bytes_per_element;
+        let byte_length = accessor.count * bytes_per_element;
 
-        let data = match accessor.buffer_view {
+        Ok(match accessor.buffer_view {
             Some(buffer_view_id) => {
-                let buffer_view = &info.buffer_views.as_ref().unwrap()[buffer_view_id as usize];
-                let offset = (accessor.byte_offset + buffer_view.byte_offset) as usize;
+                let buffer_view = &info.buffer_views.as_ref().unwrap()[buffer_view_id];
+                let offset = accessor.byte_offset + buffer_view.byte_offset;
                 let stride = match buffer_view.byte_stride {
-                    Some(stride) => stride as usize,
+                    Some(stride) => stride,
                     None => components_per_element * component_byte_size,
                 };
 
@@ -342,7 +478,7 @@ impl Gltf {
                     bin[offset..offset + byte_length].to_vec()
                 } else {
                     let mut data = vec![0u8; byte_length];
-                    for element_id in 0..accessor.count as usize {
+                    for element_id in 0..accessor.count {
                         let src_start = offset + element_id * stride;
                         let src_end = src_start + bytes_per_element;
                         let dst_start = element_id * bytes_per_element;
@@ -353,11 +489,6 @@ impl Gltf {
                 }
             }
             None => vec![0u8; byte_length],
-        };
-
-        let mut buffer = Buffer::new(device, allocator.clone(), buffer_usage, byte_length as u64);
-        buffer.set_name(debug_utils_device, name);
-        buffer.write(&data, 0);
-        Ok(buffer)
+        })
     }
 }

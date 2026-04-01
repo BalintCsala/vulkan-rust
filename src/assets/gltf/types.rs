@@ -5,21 +5,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TextureInfo {
-    pub(super) index: i32,
+    pub(super) index: usize,
     #[serde(default = "TextureInfo::default_tex_coord")]
-    pub(super) tex_coord: i32,
+    pub(super) tex_coord: u8,
 }
 
 impl TextureInfo {
-    fn default_tex_coord() -> i32 {
+    fn default_tex_coord() -> u8 {
         0
     }
 }
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Texture {
-    pub(super) sampler: Option<i32>,
-    pub(super) source: Option<i32>,
+    pub(super) sampler: Option<usize>,
+    pub(super) source: Option<usize>,
     pub(super) name: Option<String>,
 }
 
@@ -34,7 +34,7 @@ pub(super) struct Skin {
 
 #[derive(Serialize, Deserialize)]
 pub struct Scene {
-    pub nodes: Vec<i32>,
+    pub nodes: Vec<usize>,
     pub name: Option<String>,
 }
 
@@ -63,10 +63,10 @@ impl Sampler {
 #[derive(Serialize, Deserialize)]
 pub struct Node {
     pub camera: Option<i32>,
-    pub children: Option<Vec<i32>>,
-    pub skin: Option<i32>,
+    pub children: Option<Vec<usize>>,
+    pub skin: Option<usize>,
     pub matrix: Option<[f32; 16]>,
-    pub mesh: Option<i32>,
+    pub mesh: Option<usize>,
     #[serde(default = "Node::default_rotation")]
     pub rotation: [f32; 4],
     #[serde(default = "Node::default_scale")]
@@ -93,9 +93,9 @@ impl Node {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Primitive {
-    pub(super) attributes: HashMap<String, i32>,
-    pub(super) indices: Option<i32>,
-    pub(super) material: Option<i32>,
+    pub(super) attributes: HashMap<String, usize>,
+    pub(super) indices: Option<usize>,
+    pub(super) material: Option<usize>,
     #[serde(default = "Primitive::default_mode")]
     pub(super) mode: i32,
 }
@@ -143,15 +143,15 @@ impl PbrMetallicRoughness {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct NormalTexture {
-    pub(super) index: i32,
+    pub(super) index: usize,
     #[serde(default = "NormalTexture::default_tex_coord")]
-    pub(super) tex_coord: i32,
+    pub(super) tex_coord: usize,
     #[serde(default = "NormalTexture::default_scale")]
     pub(super) scale: f32,
 }
 
 impl NormalTexture {
-    fn default_tex_coord() -> i32 {
+    fn default_tex_coord() -> usize {
         0
     }
 
@@ -163,15 +163,15 @@ impl NormalTexture {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct OcclusionTexture {
-    pub(super) index: i32,
+    pub(super) index: usize,
     #[serde(default = "OcclusionTexture::default_tex_coord")]
-    pub(super) tex_coord: i32,
+    pub(super) tex_coord: usize,
     #[serde(default = "OcclusionTexture::default_strength")]
     pub(super) strength: f32,
 }
 
 impl OcclusionTexture {
-    fn default_tex_coord() -> i32 {
+    fn default_tex_coord() -> usize {
         0
     }
 
@@ -224,7 +224,7 @@ impl Material {
 pub(super) struct Image {
     pub(super) uri: Option<String>,
     pub(super) mime_type: Option<String>,
-    pub(super) buffer_view: Option<i32>,
+    pub(super) buffer_view: Option<usize>,
     pub(super) name: Option<String>,
 }
 
@@ -234,11 +234,11 @@ pub(super) struct Camera {}
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct BufferView {
-    pub(super) buffer: i32,
+    pub(super) buffer: usize,
     #[serde(default)]
-    pub(super) byte_offset: i32,
-    pub(super) byte_length: i32,
-    pub(super) byte_stride: Option<i32>,
+    pub(super) byte_offset: usize,
+    pub(super) byte_length: usize,
+    pub(super) byte_stride: Option<usize>,
     pub(super) target: Option<i32>,
     pub(super) name: Option<String>,
 }
@@ -247,7 +247,7 @@ pub(super) struct BufferView {
 #[serde(rename_all = "camelCase")]
 pub(super) struct GltfBuffer {
     pub(super) uri: Option<String>,
-    pub(super) byte_length: i32,
+    pub(super) byte_length: i64,
     pub(super) name: Option<String>,
 }
 
@@ -262,21 +262,21 @@ pub(super) struct Asset {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Animation {
-    pub(super) channels: Option<()>,
-    pub(super) samplers: Option<()>,
+    //pub(super) channels: Option<()>,
+    //pub(super) samplers: Option<()>,
     pub(super) name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Accessor {
-    pub(super) buffer_view: Option<i32>,
+    pub(super) buffer_view: Option<usize>,
     #[serde(default)]
-    pub(super) byte_offset: i32,
-    pub(super) component_type: i32,
+    pub(super) byte_offset: usize,
+    pub(super) component_type: i64,
     #[serde(default)]
     pub(super) normalized: bool,
-    pub(super) count: i32,
+    pub(super) count: usize,
     #[serde(rename = "type")]
     pub(super) element_type: String,
     pub(super) max: Option<Vec<f32>>,
@@ -299,7 +299,7 @@ pub(super) struct Info {
     pub(super) meshes: Option<Vec<GltfMesh>>,
     pub(super) nodes: Option<Vec<Node>>,
     pub(super) samplers: Option<Vec<Sampler>>,
-    pub(super) scene: Option<u32>,
+    pub(super) scene: Option<usize>,
     pub(super) scenes: Option<Vec<Scene>>,
     pub(super) skins: Option<Vec<Skin>>,
     pub(super) textures: Option<Vec<Texture>>,

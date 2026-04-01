@@ -12,7 +12,6 @@ use winit::raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use crate::rendering::{
     command_cache::CommandCache,
     image::Image,
-    resource_manager::ResourceManager,
     vulkan_utils::assign_debug_name,
     wrappers::{allocator::Allocator, device::Device, instance::Instance},
 };
@@ -47,7 +46,7 @@ impl FrameData {
                 .unwrap()
         };
         assign_debug_name(
-            &debug_utils_device,
+            debug_utils_device,
             fence,
             &format!("Frame fence #{}", frame_id),
         );
@@ -97,7 +96,7 @@ pub struct VulkanState {
     _instance: Arc<Instance>,
     _physical_device: vk::PhysicalDevice,
     pub device: Arc<Device>,
-    queue: vk::Queue,
+    pub queue: vk::Queue,
 
     surface_instance: surface::Instance,
     surface: vk::SurfaceKHR,
@@ -115,8 +114,6 @@ pub struct VulkanState {
     frame_id: usize,
 
     pub allocator: Arc<Allocator>,
-
-    pub resource_manager: ResourceManager,
 
     pub debug_utils_device: debug_utils::Device,
 }
@@ -203,8 +200,12 @@ impl VulkanState {
                     .queue_priorities(&[1.0])])
                 .enabled_extension_names(&[swapchain::NAME.as_ptr()])
                 .push_next(
-                    &mut vk::PhysicalDeviceFeatures2::default()
-                        .features(vk::PhysicalDeviceFeatures::default()),
+                    &mut vk::PhysicalDeviceFeatures2::default().features(
+                        vk::PhysicalDeviceFeatures::default()
+                            .shader_int16(true)
+                            .shader_int64(true)
+                            .geometry_shader(true),
+                    ),
                 )
                 .push_next(
                     &mut vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true),
@@ -218,7 +219,8 @@ impl VulkanState {
                         .shader_sampled_image_array_non_uniform_indexing(true)
                         .shader_storage_image_array_non_uniform_indexing(true)
                         .descriptor_binding_sampled_image_update_after_bind(true)
-                        .descriptor_binding_storage_image_update_after_bind(true),
+                        .descriptor_binding_storage_image_update_after_bind(true)
+                        .shader_int8(true),
                 )
                 .push_next(
                     &mut vk::PhysicalDeviceVulkan13Features::default()
@@ -251,7 +253,6 @@ impl VulkanState {
             .collect();
 
         let extent = vk::Extent2D::default().width(width).height(height);
-        let resource_manager = ResourceManager::new(device.clone(), allocator.clone(), extent);
 
         Self {
             _entry: entry,
@@ -273,7 +274,6 @@ impl VulkanState {
             present_mode,
             surface_format,
             min_image_count,
-            resource_manager,
         }
     }
 
@@ -315,7 +315,10 @@ impl VulkanState {
                         .image_format(self.surface_format.format)
                         .image_color_space(self.surface_format.color_space)
                         .min_image_count(self.min_image_count)
-                        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                        .image_usage(
+                            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                                | vk::ImageUsageFlags::TRANSFER_DST,
+                        )
                         .image_extent(self.extent)
                         .surface(self.surface)
                         .image_array_layers(1)
@@ -343,6 +346,14 @@ impl VulkanState {
                 })
                 .collect()
         };
+        self.images.iter().enumerate().for_each(|(i, image_data)| {
+            assign_debug_name(
+                &self.debug_utils_device,
+                image_data.image.handle,
+                &format!("Swapchain image #{}", i),
+            );
+        });
+
         self.swapchain = Some(swapchain);
 
         if let Some(swapchain) = old_swapchain {
@@ -375,28 +386,15 @@ impl VulkanState {
     }
 
     pub fn get_command_buffer(&mut self) -> vk::CommandBuffer {
-        let command_buffer = self.frames[self.frame_id]
+        self.frames[self.frame_id]
             .command_cache
-            .get_command_buffer();
-
-        unsafe {
-            self.device
-                .begin_command_buffer(
-                    command_buffer,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .unwrap();
-        }
-
-        command_buffer
+            .get_command_buffer()
     }
 
     pub fn start_frame(&mut self, width: u32, height: u32) -> bool {
         if self.swapchain.is_none() || width != self.extent.width || height != self.extent.height {
             self.extent = vk::Extent2D::default().width(width).height(height);
             self.create_swapchain();
-            self.resource_manager.resize(width, height);
         }
         let swapchain = self.swapchain.unwrap();
         unsafe {
