@@ -10,7 +10,6 @@ use bevy::{
         resource::Resource,
         system::{Commands, Query, Res, ResMut, Single},
     },
-    math::Vec2,
     transform::components::Transform,
     window::{RawHandleWrapperHolder, Window},
 };
@@ -36,7 +35,6 @@ struct Renderable {
 #[derive(Resource)]
 struct RendererState {
     device: Arc<Device>,
-    pipeline_layout: vk::PipelineLayout,
 
     depth_buffer: ImageReference,
 
@@ -60,10 +58,7 @@ impl Drop for RendererState {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline(self.visibility_pipeline, None);
-        };
-        unsafe {
-            self.device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_pipeline(self.post_pipeline, None);
         };
     }
 }
@@ -104,28 +99,13 @@ fn create_render_resources(
     let visibility_shader = Shader::new(vulkan_state.device.clone(), "spv/visibility.spv").unwrap();
     let post_shader = Shader::new(vulkan_state.device.clone(), "spv/post.spv").unwrap();
 
-    let pipeline_layout = unsafe {
-        vulkan_state
-            .device
-            .create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .push_constant_ranges(&[vk::PushConstantRange::default()
-                        .stage_flags(vk::ShaderStageFlags::ALL)
-                        .offset(0)
-                        .size(256)])
-                    .set_layouts(&[resource_manager.descriptor_layout]),
-                None,
-            )
-            .unwrap()
-    };
-
     let visibility_pipeline = unsafe {
         vulkan_state
             .device
             .create_graphics_pipelines(
                 vk::PipelineCache::null(),
                 &[vk::GraphicsPipelineCreateInfo::default()
-                    .layout(pipeline_layout)
+                    .layout(resource_manager.bindless_pipeline_layout)
                     .stages(&[
                         vk::PipelineShaderStageCreateInfo::default()
                             .name(c"vs")
@@ -189,7 +169,7 @@ fn create_render_resources(
             .create_compute_pipelines(
                 vk::PipelineCache::null(),
                 &[vk::ComputePipelineCreateInfo::default()
-                    .layout(pipeline_layout)
+                    .layout(resource_manager.bindless_pipeline_layout)
                     .stage(
                         vk::PipelineShaderStageCreateInfo::default()
                             .name(c"cs")
@@ -211,7 +191,6 @@ fn create_render_resources(
             1,
             "Depth buffer".to_owned(),
         ),
-        pipeline_layout,
 
         visibility_buffer: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
@@ -289,8 +268,6 @@ fn render(
             vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         );
-    // TODO: Immediate command buffer
-    // TODO: Rework barriers to only need to do 1 for multiple images
     resource_manager
         .get_image_mut(&renderer_state.depth_buffer)
         .immediate_transition_from_undefined(
@@ -318,7 +295,7 @@ fn render(
         device.cmd_bind_descriptor_sets(
             command_buffer,
             vk::PipelineBindPoint::GRAPHICS,
-            renderer_state.pipeline_layout,
+            resource_manager.bindless_pipeline_layout,
             0,
             &[resource_manager.descriptor_set],
             &[],
@@ -326,7 +303,7 @@ fn render(
         device.cmd_bind_descriptor_sets(
             command_buffer,
             vk::PipelineBindPoint::COMPUTE,
-            renderer_state.pipeline_layout,
+            resource_manager.bindless_pipeline_layout,
             0,
             &[resource_manager.descriptor_set],
             &[],
@@ -400,7 +377,7 @@ fn render(
 
         device.cmd_push_constants(
             command_buffer,
-            renderer_state.pipeline_layout,
+            resource_manager.bindless_pipeline_layout,
             vk::ShaderStageFlags::ALL,
             0,
             bytemuck::bytes_of(&push_constants),
@@ -495,7 +472,7 @@ fn render(
 
         device.cmd_push_constants(
             command_buffer,
-            renderer_state.pipeline_layout,
+            resource_manager.bindless_pipeline_layout,
             vk::ShaderStageFlags::ALL,
             0,
             bytemuck::bytes_of(&post_push_constants),

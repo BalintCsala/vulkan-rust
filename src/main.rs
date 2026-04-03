@@ -90,7 +90,7 @@ fn setup_scene(mut commands: Commands) {
         Camera {
             fov_y: 90.0f32.to_radians(),
             z_near: 0.1,
-            z_far: 100.0,
+            z_far: 200.0,
             resolution: CameraResolution::Scale(1.0),
         },
     ));
@@ -107,7 +107,10 @@ fn init_rendering(
             .create_sampler(
                 &vk::SamplerCreateInfo::default()
                     .min_filter(vk::Filter::LINEAR)
-                    .mag_filter(vk::Filter::LINEAR),
+                    .mag_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                    .min_lod(0.0)
+                    .max_lod(vk::LOD_CLAMP_NONE),
                 None,
             )
             .unwrap()
@@ -118,7 +121,7 @@ fn init_rendering(
         &vulkan_state.allocator,
         &vulkan_state.debug_utils_device,
         &mut resource_manager,
-        &mut File::open("./assets/Bistro.glb").unwrap(),
+        &mut File::open("./assets/BistroExterior.glb").unwrap(),
     )
     .unwrap();
 

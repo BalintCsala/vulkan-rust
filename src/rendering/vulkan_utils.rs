@@ -7,7 +7,20 @@ pub fn full_subresource_range(aspect: vk::ImageAspectFlags) -> vk::ImageSubresou
         .base_mip_level(0)
         .level_count(vk::REMAINING_MIP_LEVELS)
         .base_array_layer(0)
-        .layer_count(vk::REMAINING_MIP_LEVELS)
+        .layer_count(1)
+        .aspect_mask(aspect)
+}
+
+pub fn mip_level_subresource_range(
+    aspect: vk::ImageAspectFlags,
+    base_level: u32,
+    level_count: u32,
+) -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .base_mip_level(base_level)
+        .level_count(level_count)
+        .base_array_layer(0)
+        .layer_count(1)
         .aspect_mask(aspect)
 }
 

@@ -6,6 +6,7 @@ use vk_mem::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, Mem
 use crate::rendering::{
     vulkan_utils::{
         assign_debug_name, format_to_aspect, full_subresource_range, image_type_to_view_type,
+        mip_level_subresource_range,
     },
     wrappers::{allocator::Allocator, device::Device},
 };
@@ -14,6 +15,7 @@ pub struct Image {
     pub layout: vk::ImageLayout,
     pub format: vk::Format,
     pub view: vk::ImageView,
+    mip_views: Vec<vk::ImageView>,
     allocation: Option<Allocation>,
     pub handle: vk::Image,
     allocator: Option<Arc<Allocator>>,
@@ -71,8 +73,33 @@ impl Image {
                 )
                 .unwrap()
         };
+        assign_debug_name(debug_utils_device, view, &format!("{name} main view"));
 
-        assign_debug_name(debug_utils_device, image, &format!("{name} main view"));
+        let mip_views = (1..mip_levels)
+            .map(|level| unsafe {
+                let view = device
+                    .create_image_view(
+                        &vk::ImageViewCreateInfo::default()
+                            .image(image)
+                            .components(vk::ComponentMapping::default())
+                            .format(format)
+                            .subresource_range(mip_level_subresource_range(
+                                format_to_aspect(format),
+                                level,
+                                1,
+                            ))
+                            .view_type(image_type_to_view_type(image_type)),
+                        None,
+                    )
+                    .unwrap();
+                assign_debug_name(
+                    debug_utils_device,
+                    view,
+                    &format!("{name} mip #{level} view"),
+                );
+                view
+            })
+            .collect();
 
         Self {
             device,
@@ -80,6 +107,7 @@ impl Image {
             handle: image,
             allocation: Some(allocation),
             view,
+            mip_views,
             layout: vk::ImageLayout::UNDEFINED,
             format,
         }
@@ -110,9 +138,18 @@ impl Image {
             allocator: None,
             handle: image,
             view,
+            mip_views: Vec::new(),
             allocation: None,
             layout,
             format,
+        }
+    }
+
+    pub fn get_mip_view(&self, level: usize) -> vk::ImageView {
+        if level == 0 {
+            self.view
+        } else {
+            self.mip_views[level - 1]
         }
     }
 

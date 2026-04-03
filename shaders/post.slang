@@ -14,31 +14,11 @@ struct PushConstants {
 [vk::push_constant]
 PushConstants pushConstants;
 
-// Temp
-float hash1(uint x) {
-    x ^= x >> 17;
-    x *= 0xed5ad4bb;
-    x ^= x >> 11;
-    x *= 0xac4c1b51;
-    x ^= x >> 15;
-    x *= 0x31848bab;
-    x ^= x >> 14;
-    return (float) (x & 0xFFFFFF) / 16777215.0;
-}
-
-float3 hashColor(uint seed) {
-    float r = hash1(seed);
-    float g = hash1(seed + 0x9e3779b9);
-    float b = hash1(seed + 0x243f6a88);
-
-    return float3(r, g, b);
-}
-
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cs(uint2 gid: SV_DispatchThreadID) {
     var visibilityBuffer = getStorageImage<RWTexture2D<uint>>(pushConstants.visibilityBufferId);
-    var output           = getStorageImage<RWTexture2D<float4>>(pushConstants.outputId);
+    var output = getStorageImage<RWTexture2D<float4>>(pushConstants.outputId);
 
     var uniqueId = visibilityBuffer[gid];
     if (uniqueId == 0) {
@@ -49,7 +29,7 @@ void cs(uint2 gid: SV_DispatchThreadID) {
     var triangleId = getTriangleIdFromUniqueId(uniqueId);
 
     var instance = pushConstants.instances[instanceId];
-    var model    = pushConstants.models[instance.modelId];
+    var model = pushConstants.models[instance.modelId];
 
     var index0 = model.indices[triangleId * 3 + 0];
     var index1 = model.indices[triangleId * 3 + 1];

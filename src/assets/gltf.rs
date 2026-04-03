@@ -239,8 +239,16 @@ impl Gltf {
                         } else {
                             vk::Format::R8G8B8A8_UNORM
                         },
-                        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-                        1,
+                        if srgb_textures.contains(source) {
+                            vk::ImageUsageFlags::SAMPLED
+                                | vk::ImageUsageFlags::TRANSFER_DST
+                                | vk::ImageUsageFlags::TRANSFER_SRC
+                        } else {
+                            vk::ImageUsageFlags::SAMPLED
+                                | vk::ImageUsageFlags::STORAGE
+                                | vk::ImageUsageFlags::TRANSFER_DST
+                        },
+                        u32::min(img.width(), img.height()).ilog2() + 1,
                         1,
                         format!("Gltf texture #{i}"),
                     );
@@ -250,7 +258,6 @@ impl Gltf {
                 .collect::<Vec<_>>();
 
             resource_manager.upload_image_data(uploads.as_slice());
-            resource_manager.flush_staging();
             println!("Finished uploading images");
         }
 

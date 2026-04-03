@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use ash::{ext::debug_utils, vk};
 use bevy::{ecs::resource::Resource, math::Mat4};
+use bytemuck::{Pod, Zeroable};
 
 use crate::{
     assets::model::ModelData,
@@ -9,8 +10,12 @@ use crate::{
         buffer::Buffer,
         command_cache::CommandCache,
         image::Image,
-        vulkan_utils::format_to_aspect,
-        wrappers::{allocator::Allocator, device::Device},
+        shader::Shader,
+        vulkan_utils::{format_to_aspect, mip_level_subresource_range},
+        wrappers::{
+            allocator::Allocator,
+            device::{self, Device},
+        },
     },
 };
 
@@ -111,14 +116,18 @@ pub struct ResourceManager {
     queue: vk::Queue,
     allocator: Arc<Allocator>,
     debug_utils_device: debug_utils::Device,
+
     command_cache: CommandCache,
     extent: vk::Extent2D,
+
+    pub bindless_pipeline_layout: vk::PipelineLayout,
 
     descriptor_pool: vk::DescriptorPool,
     pub descriptor_layout: vk::DescriptorSetLayout,
     pub descriptor_set: vk::DescriptorSet,
 
-    images: Vec<ImageInfo>,
+    images: HashMap<ImageReference, ImageInfo>,
+    next_image_reference: ImageReference,
     samplers: Vec<vk::Sampler>,
 
     // TODO: Better suballocation strategy
@@ -132,6 +141,8 @@ pub struct ResourceManager {
     staging_buffer: Buffer,
     staging_buffer_offset: usize,
     staging_fences: Vec<vk::Fence>,
+
+    mipmap_pipeline: vk::Pipeline,
 }
 
 impl ResourceManager {
@@ -240,13 +251,51 @@ impl ResourceManager {
 
         let command_cache = CommandCache::new(device.clone());
 
+        let bindless_pipeline_layout = unsafe {
+            device
+                .create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default()
+                        .push_constant_ranges(&[vk::PushConstantRange::default()
+                            .stage_flags(vk::ShaderStageFlags::ALL)
+                            .offset(0)
+                            .size(256)])
+                        .set_layouts(&[descriptor_layout]),
+                    None,
+                )
+                .unwrap()
+        };
+
+        let mipmap_shader_module = Shader::new(device.clone(), "./spv/mipmap.spv").unwrap();
+
+        let mipmap_pipeline = unsafe {
+            device
+                .create_compute_pipelines(
+                    vk::PipelineCache::null(),
+                    &[vk::ComputePipelineCreateInfo::default()
+                        .layout(bindless_pipeline_layout)
+                        .stage(
+                            vk::PipelineShaderStageCreateInfo::default()
+                                .stage(vk::ShaderStageFlags::COMPUTE)
+                                .name(c"cs")
+                                .module(mipmap_shader_module.module),
+                        )],
+                    None,
+                )
+                .unwrap()[0]
+        };
+
         Self {
             device,
             allocator,
             debug_utils_device,
             queue,
+
             extent,
-            images: Vec::new(),
+
+            bindless_pipeline_layout,
+
+            images: HashMap::new(),
+            next_image_reference: 0,
             samplers: Vec::new(),
 
             model_buffer,
@@ -262,10 +311,11 @@ impl ResourceManager {
             descriptor_set,
             instance_buffer,
             next_instance_ref: 0,
+            mipmap_pipeline,
         }
     }
 
-    fn write_image_to_descriptor(
+    fn write_images_to_descriptor(
         &self,
         usage: vk::ImageUsageFlags,
         reference: &ImageReference,
@@ -314,39 +364,43 @@ impl ResourceManager {
         usage: vk::ImageUsageFlags,
         name: String,
     ) -> ImageReference {
-        let reference = self.images.len() as i16;
+        let reference = self.next_image_reference;
+        self.next_image_reference += 1;
 
         let descriptor_image_info = [vk::DescriptorImageInfo::default()
             .image_layout(vk::ImageLayout::GENERAL)
             .image_view(image.view)];
 
-        self.write_image_to_descriptor(usage, &reference, &descriptor_image_info);
+        self.write_images_to_descriptor(usage, &reference, &descriptor_image_info);
 
-        self.images.push(ImageInfo {
-            size: ImageSize::Fixed(1, 1),
-            usage,
-            format: image.format,
-            mip_levels: 1,
-            array_layers: 1,
-            image,
-            name,
-        });
+        self.images.insert(
+            reference,
+            ImageInfo {
+                size: ImageSize::Fixed(1, 1),
+                usage,
+                format: image.format,
+                mip_levels: 1,
+                array_layers: 1,
+                image,
+                name,
+            },
+        );
 
         reference
     }
 
-    pub fn update_raw_image(&mut self, image: Image, reference: &ImageReference) -> Image {
+    pub fn replace_raw_image(&mut self, image: Image, reference: &ImageReference) -> Image {
         let descriptor_image_info = [vk::DescriptorImageInfo::default()
             .image_layout(vk::ImageLayout::GENERAL)
             .image_view(image.view)];
 
-        self.write_image_to_descriptor(
-            self.images[(*reference) as usize].usage,
+        self.write_images_to_descriptor(
+            self.images[reference].usage,
             reference,
             &descriptor_image_info,
         );
 
-        std::mem::replace(&mut self.images[(*reference) as usize].image, image)
+        std::mem::replace(&mut self.images.get_mut(reference).unwrap().image, image)
     }
 
     pub fn create_empty_image(
@@ -358,7 +412,8 @@ impl ResourceManager {
         array_layers: u32,
         name: String,
     ) -> ImageReference {
-        let reference = self.images.len() as i16;
+        let reference = self.next_image_reference;
+        self.next_image_reference += mip_levels as i16;
 
         let (extent, image_type) = size.evaluate(self.extent.width, self.extent.height);
         let image = Image::new(
@@ -374,21 +429,28 @@ impl ResourceManager {
             &name,
         );
 
-        let image_info = [vk::DescriptorImageInfo::default()
-            .image_layout(vk::ImageLayout::GENERAL)
-            .image_view(image.view)];
+        let image_info: Vec<_> = (0..mip_levels)
+            .map(|level| {
+                vk::DescriptorImageInfo::default()
+                    .image_layout(vk::ImageLayout::GENERAL)
+                    .image_view(image.get_mip_view(level as usize))
+            })
+            .collect();
 
-        self.write_image_to_descriptor(usage, &reference, &image_info);
+        self.write_images_to_descriptor(usage, &reference, &image_info);
 
-        self.images.push(ImageInfo {
-            size,
-            usage,
-            format,
-            mip_levels,
-            array_layers,
-            image,
-            name,
-        });
+        self.images.insert(
+            reference,
+            ImageInfo {
+                size,
+                usage,
+                format,
+                mip_levels,
+                array_layers,
+                image,
+                name,
+            },
+        );
 
         reference
     }
@@ -442,24 +504,24 @@ impl ResourceManager {
     pub fn upload_image_data<T>(&mut self, image_data: &[(ImageReference, &[T])]) {
         let mut command_buffer = self.command_cache.get_command_buffer();
 
-        let initial_layout_transitions = image_data
-            .iter()
-            .map(|(reference, _)| {
-                let image_info = &mut self.images[*reference as usize];
-                image_info.image.get_transition_barrier(
-                    vk::PipelineStageFlags2::NONE,
-                    vk::AccessFlags2::NONE,
-                    vk::PipelineStageFlags2::COPY,
-                    vk::AccessFlags2::TRANSFER_WRITE,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                )
-            })
-            .collect::<Vec<_>>();
         unsafe {
             self.device.cmd_pipeline_barrier2(
                 command_buffer,
-                &vk::DependencyInfo::default()
-                    .image_memory_barriers(initial_layout_transitions.as_slice()),
+                &vk::DependencyInfo::default().image_memory_barriers(
+                    &image_data
+                        .iter()
+                        .map(|(reference, _)| {
+                            let image_info = &mut self.images.get_mut(reference).unwrap();
+                            image_info.image.get_transition_barrier(
+                                vk::PipelineStageFlags2::NONE,
+                                vk::AccessFlags2::NONE,
+                                vk::PipelineStageFlags2::COPY,
+                                vk::AccessFlags2::TRANSFER_WRITE,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
             );
         };
 
@@ -477,7 +539,6 @@ impl ResourceManager {
             if STAGING_BUFFER_SIZE - self.staging_buffer_offset < required_space {
                 if !pending_barriers.is_empty() {
                     self.dispatch_copy_from_staging(command_buffer, &pending_barriers);
-                    println!("Staged {} images in one upload", pending_barriers.len());
                     pending_barriers.clear();
                     command_buffer = self.command_cache.get_command_buffer();
                 }
@@ -485,7 +546,7 @@ impl ResourceManager {
             }
 
             self.staging_buffer.write(data, self.staging_buffer_offset);
-            let image_info = &mut self.images[*reference as usize];
+            let image_info = &mut self.images.get_mut(reference).unwrap();
 
             unsafe {
                 self.device.cmd_copy_buffer_to_image(
@@ -516,7 +577,11 @@ impl ResourceManager {
                 vk::AccessFlags2::TRANSFER_WRITE,
                 vk::PipelineStageFlags2::NONE,
                 vk::AccessFlags2::NONE,
-                vk::ImageLayout::READ_ONLY_OPTIMAL,
+                if image_info.mip_levels > 0 {
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                } else {
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+                },
             ));
 
             self.staging_buffer_offset += required_space;
@@ -524,7 +589,192 @@ impl ResourceManager {
         }
 
         self.dispatch_copy_from_staging(command_buffer, pending_barriers.as_slice());
-        println!("Staged {} images in one upload", pending_barriers.len());
+        self.flush_staging();
+
+        let mipmapped_image_data: Vec<_> = image_data
+            .iter()
+            .filter(|(reference, _)| self.images[reference].mip_levels > 1)
+            .collect();
+
+        if !mipmapped_image_data.is_empty() {
+            #[repr(C)]
+            #[derive(Clone, Copy, Pod, Zeroable)]
+            struct MipmapPushConstant {
+                base_image_id: u32,
+                num_of_mips: u32,
+            }
+
+            let command_buffer = self.command_cache.get_command_buffer();
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.mipmap_pipeline,
+                );
+            };
+            unsafe {
+                self.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.bindless_pipeline_layout,
+                    0,
+                    &[self.descriptor_set],
+                    &[],
+                );
+            };
+
+            for (reference, _) in mipmapped_image_data {
+                let info = &mut self.images.get_mut(reference).unwrap();
+                let (extent, _) = info.size.evaluate(self.extent.width, self.extent.height);
+
+                if info.usage.contains(vk::ImageUsageFlags::STORAGE) {
+                    unsafe {
+                        self.device.cmd_push_constants(
+                            command_buffer,
+                            self.bindless_pipeline_layout,
+                            vk::ShaderStageFlags::ALL,
+                            0,
+                            bytemuck::bytes_of(&MipmapPushConstant {
+                                base_image_id: *reference as u32,
+                                num_of_mips: info.mip_levels,
+                            }),
+                        );
+                    };
+
+                    unsafe {
+                        self.device.cmd_dispatch(
+                            command_buffer,
+                            extent.width.div_ceil(32),
+                            extent.height.div_ceil(32),
+                            1,
+                        );
+                    };
+                } else if info
+                    .usage
+                    .contains(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC)
+                {
+                    let mut src_mip_width = extent.width;
+                    let mut src_mip_height = extent.height;
+                    for mip_level in 0..info.mip_levels - 1 {
+                        unsafe {
+                            self.device.cmd_pipeline_barrier2(
+                                command_buffer,
+                                &vk::DependencyInfo::default().image_memory_barriers(&[
+                                    vk::ImageMemoryBarrier2::default()
+                                        .image(info.image.handle)
+                                        .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                                        .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                                        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                                        .subresource_range(mip_level_subresource_range(
+                                            format_to_aspect(info.format),
+                                            mip_level,
+                                            1,
+                                        )),
+                                ]),
+                            );
+                        };
+
+                        unsafe {
+                            self.device.cmd_blit_image2(
+                                command_buffer,
+                                &vk::BlitImageInfo2::default()
+                                    .src_image(info.image.handle)
+                                    .src_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                                    .dst_image(info.image.handle)
+                                    .dst_image_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                    .regions(&[vk::ImageBlit2::default()
+                                        .src_subresource(
+                                            vk::ImageSubresourceLayers::default()
+                                                .base_array_layer(0)
+                                                .layer_count(info.array_layers)
+                                                .aspect_mask(format_to_aspect(info.format))
+                                                .mip_level(mip_level),
+                                        )
+                                        .src_offsets([
+                                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                                            vk::Offset3D {
+                                                x: src_mip_width as i32,
+                                                y: src_mip_height as i32,
+                                                z: 1,
+                                            },
+                                        ])
+                                        .dst_subresource(
+                                            vk::ImageSubresourceLayers::default()
+                                                .base_array_layer(0)
+                                                .layer_count(info.array_layers)
+                                                .aspect_mask(format_to_aspect(info.format))
+                                                .mip_level(mip_level + 1),
+                                        )
+                                        .dst_offsets([
+                                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                                            vk::Offset3D {
+                                                x: (src_mip_width / 2).max(1) as i32,
+                                                y: (src_mip_height / 2).max(1) as i32,
+                                                z: 1,
+                                            },
+                                        ])])
+                                    .filter(vk::Filter::LINEAR),
+                            );
+                        }
+
+                        src_mip_width /= 2;
+                        src_mip_height /= 2;
+                    }
+
+                    unsafe {
+                        self.device.cmd_pipeline_barrier2(
+                            command_buffer,
+                            &vk::DependencyInfo::default().image_memory_barriers(&[
+                                vk::ImageMemoryBarrier2::default()
+                                    .image(info.image.handle)
+                                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                                    .subresource_range(mip_level_subresource_range(
+                                        format_to_aspect(info.format),
+                                        info.mip_levels - 1,
+                                        1,
+                                    )),
+                            ]),
+                        );
+                    };
+
+                    info.image.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+                    info.image.immediate_transition(
+                        command_buffer,
+                        vk::PipelineStageFlags2::BLIT,
+                        vk::AccessFlags2::TRANSFER_WRITE,
+                        vk::PipelineStageFlags2::NONE,
+                        vk::AccessFlags2::NONE,
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    );
+                } else {
+                    panic!(
+                        "Can't generate mipmaps without STORAGE or TRANSFER_DST | TRANSFER_SRC usages"
+                    );
+                }
+            }
+
+            unsafe {
+                self.device.end_command_buffer(command_buffer).unwrap();
+            };
+
+            unsafe {
+                self.device
+                    .queue_submit(
+                        self.queue,
+                        &[vk::SubmitInfo::default().command_buffers(&[command_buffer])],
+                        vk::Fence::null(),
+                    )
+                    .unwrap();
+            };
+        }
     }
 
     pub fn upload_model(
@@ -578,9 +828,7 @@ impl ResourceManager {
         let (image_indices, image_infos): (Vec<_>, Vec<_>) = self
             .images
             .iter_mut()
-            .enumerate()
             .filter_map(|(reference, image_info)| {
-                // TODO: Make image resize itself
                 if matches!(image_info.size, ImageSize::Fixed(_, _))
                     || matches!(image_info.size, ImageSize::Fixed3D(_, _, _))
                 {
@@ -601,7 +849,7 @@ impl ResourceManager {
                     &image_info.name,
                 );
                 Some((
-                    reference,
+                    *reference,
                     vk::DescriptorImageInfo::default()
                         .image_layout(vk::ImageLayout::GENERAL)
                         .image_view(image_info.image.view),
@@ -627,7 +875,7 @@ impl ResourceManager {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, &reference)| {
-                    if self.images[reference].usage.contains(usage) {
+                    if self.images[&reference].usage.contains(usage) {
                         Some(i)
                     } else {
                         None
@@ -694,11 +942,11 @@ impl ResourceManager {
     }
 
     pub fn get_image(&self, reference: &ImageReference) -> &Image {
-        &self.images[*reference as usize].image
+        &self.images[reference].image
     }
 
     pub fn get_image_mut(&mut self, reference: &ImageReference) -> &mut Image {
-        &mut self.images[*reference as usize].image
+        &mut self.images.get_mut(reference).unwrap().image
     }
 }
 
@@ -707,12 +955,17 @@ impl Drop for ResourceManager {
         println!("Dropped resource manager");
         unsafe {
             self.device
+                .destroy_pipeline_layout(self.bindless_pipeline_layout, None);
+        };
+        unsafe {
+            self.device
                 .destroy_descriptor_set_layout(self.descriptor_layout, None);
         };
         unsafe {
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
         };
+
         self.images.clear();
     }
 }
