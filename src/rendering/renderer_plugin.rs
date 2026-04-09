@@ -41,7 +41,10 @@ struct RendererState {
     visibility_buffer: ImageReference,
     visibility_pipeline: vk::Pipeline,
 
-    intermediary_image: ImageReference,
+    base_color_output: ImageReference,
+    normal_output: ImageReference,
+    metallic_roughness_output: ImageReference,
+    emissive_output: ImageReference,
 
     post_pipeline: vk::Pipeline,
 }
@@ -97,7 +100,7 @@ fn create_render_resources(
     );
 
     let visibility_shader = Shader::new(vulkan_state.device.clone(), "spv/visibility.spv").unwrap();
-    let post_shader = Shader::new(vulkan_state.device.clone(), "spv/post.spv").unwrap();
+    let post_shader = Shader::new(vulkan_state.device.clone(), "spv/materials.spv").unwrap();
 
     let visibility_pipeline = unsafe {
         vulkan_state
@@ -204,7 +207,7 @@ fn create_render_resources(
         ),
         visibility_pipeline,
 
-        intermediary_image: resource_manager.create_empty_image(
+        base_color_output: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
             vk::Format::R8G8B8A8_UNORM,
             vk::ImageUsageFlags::STORAGE
@@ -212,8 +215,33 @@ fn create_render_resources(
                 | vk::ImageUsageFlags::TRANSFER_DST,
             1,
             1,
-            "Intermediary".to_owned(),
+            "Base color material texture".to_owned(),
         ),
+        normal_output: resource_manager.create_empty_image(
+            ImageSize::Scaled(1.0, 1.0),
+            vk::Format::R16G16B16A16_SNORM,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            1,
+            1,
+            "Normal material texture".to_owned(),
+        ),
+        metallic_roughness_output: resource_manager.create_empty_image(
+            ImageSize::Scaled(1.0, 1.0),
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            1,
+            1,
+            "Metallic-roughness material texture".to_owned(),
+        ),
+        emissive_output: resource_manager.create_empty_image(
+            ImageSize::Scaled(1.0, 1.0),
+            vk::Format::R16G16B16A16_SFLOAT,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            1,
+            1,
+            "Emissive material texture".to_owned(),
+        ),
+
         post_pipeline,
     });
     commands.insert_resource(resource_manager);
@@ -415,7 +443,7 @@ fn render(
         );
 
         resource_manager
-            .get_image_mut(&renderer_state.intermediary_image)
+            .get_image_mut(&renderer_state.base_color_output)
             .immediate_transition(
                 command_buffer,
                 vk::PipelineStageFlags2::BLIT,
@@ -427,7 +455,7 @@ fn render(
         device.cmd_clear_color_image(
             command_buffer,
             resource_manager
-                .get_image(&renderer_state.intermediary_image)
+                .get_image(&renderer_state.base_color_output)
                 .handle,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             &vk::ClearColorValue {
@@ -436,7 +464,7 @@ fn render(
             &[full_subresource_range(vk::ImageAspectFlags::COLOR)],
         );
         resource_manager
-            .get_image_mut(&renderer_state.intermediary_image)
+            .get_image_mut(&renderer_state.base_color_output)
             .immediate_transition(
                 command_buffer,
                 vk::PipelineStageFlags2::CLEAR,
@@ -454,7 +482,11 @@ fn render(
             instance_data: vk::DeviceAddress,
             resolution: [f32; 2],
             visibility_buffer_id: i32,
-            output_id: i32,
+            base_color_output_id: i32,
+            normal_output_id: i32,
+            metallic_roughness_output_id: i32,
+            emissive_output_id: i32,
+            _pad: i32,
         }
 
         let mut post_push_constants = PostPushConstants {
@@ -466,7 +498,11 @@ fn render(
                 vulkan_state.extent.height as f32,
             ],
             visibility_buffer_id: renderer_state.visibility_buffer.into(),
-            output_id: renderer_state.intermediary_image.into(),
+            base_color_output_id: renderer_state.base_color_output.into(),
+            normal_output_id: renderer_state.normal_output.into(),
+            metallic_roughness_output_id: renderer_state.metallic_roughness_output.into(),
+            emissive_output_id: renderer_state.emissive_output.into(),
+            _pad: 0,
         };
         view_projection.write_cols_to_slice(post_push_constants.view_projection.as_mut_slice());
 
@@ -496,7 +532,7 @@ fn render(
         );
 
         resource_manager
-            .get_image_mut(&renderer_state.intermediary_image)
+            .get_image_mut(&renderer_state.base_color_output)
             .immediate_transition(
                 command_buffer,
                 vk::PipelineStageFlags2::COMPUTE_SHADER,
@@ -506,7 +542,7 @@ fn render(
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             );
 
-        let source_image = resource_manager.get_image(&renderer_state.intermediary_image);
+        let source_image = resource_manager.get_image(&renderer_state.base_color_output);
         device.cmd_blit_image(
             command_buffer,
             source_image.handle,

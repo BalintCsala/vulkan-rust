@@ -145,13 +145,13 @@ impl PbrMetallicRoughness {
 pub(super) struct NormalTexture {
     pub(super) index: usize,
     #[serde(default = "NormalTexture::default_tex_coord")]
-    pub(super) tex_coord: usize,
+    pub(super) tex_coord: u8,
     #[serde(default = "NormalTexture::default_scale")]
     pub(super) scale: f32,
 }
 
 impl NormalTexture {
-    fn default_tex_coord() -> usize {
+    fn default_tex_coord() -> u8 {
         0
     }
 

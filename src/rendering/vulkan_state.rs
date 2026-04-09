@@ -220,7 +220,8 @@ impl VulkanState {
                         .shader_storage_image_array_non_uniform_indexing(true)
                         .descriptor_binding_sampled_image_update_after_bind(true)
                         .descriptor_binding_storage_image_update_after_bind(true)
-                        .shader_int8(true),
+                        .shader_int8(true)
+                        .scalar_block_layout(true),
                 )
                 .push_next(
                     &mut vk::PhysicalDeviceVulkan13Features::default()

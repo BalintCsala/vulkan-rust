@@ -35,10 +35,10 @@ public struct Barycentrics {
         ret.barycentrics.y = interpW * (0.0 + deltaVec.x * ret.ddx.y + deltaVec.y * ret.ddy.y);
         ret.barycentrics.z = interpW * (0.0 + deltaVec.x * ret.ddx.z + deltaVec.y * ret.ddy.z);
 
-        ret.ddx *= (1.0 / resolution.x);
-        ret.ddy *= (1.0 / resolution.y);
-        ddxSum *= (1.0 / resolution.x);
-        ddySum *= (1.0 / resolution.y);
+        ret.ddx *= 2.0 / resolution.x;
+        ret.ddy *= 2.0 / resolution.y;
+        ddxSum *= 2.0 / resolution.x;
+        ddySum *= 2.0 / resolution.y;
 
         ret.ddy *= -1.0;
         ddySum *= -1.0;
@@ -61,6 +61,15 @@ public struct Barycentrics {
             interpolated.ddy[i] = dot(v, ddy);
         }
         return interpolated;
+    }
+
+    public T interpolateWithoutDerivatives<T : IRWArray<float>>(T v0, T v1, T v2) {
+        T value;
+        for (int i = 0; i < v0.getCount(); i++) {
+            float3 v = float3(v0[i], v1[i], v2[i]);
+            value[i] = dot(v, barycentrics);
+        }
+        return value;
     }
 };
 

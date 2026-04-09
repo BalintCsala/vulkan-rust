@@ -153,6 +153,10 @@ impl Image {
         }
     }
 
+    pub fn get_mip_count(&self) -> u32 {
+        (self.mip_views.len() + 1) as u32
+    }
+
     pub fn get_transition_barrier<'a>(
         &mut self,
         src_stage: vk::PipelineStageFlags2,
@@ -237,6 +241,10 @@ impl Drop for Image {
         unsafe {
             self.device.destroy_image_view(self.view, None);
         }
+
+        self.mip_views.drain(..).for_each(|view| unsafe {
+            self.device.destroy_image_view(view, None);
+        });
 
         if let (Some(allocator), Some(mut allocation)) =
             (self.allocator.as_ref(), self.allocation.take())

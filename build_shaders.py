@@ -1,14 +1,16 @@
 import os
+from os.path import isdir
 import sys
 import subprocess
+import shutil
 
-try:
-    os.mkdir("spv/")
-except:
-    # Folder already exists
-    pass
 
 SLANGC_COMMAND = "slangc" if len(sys.argv) == 1 else sys.argv[1]
+
+if os.path.isdir("spv"):
+    shutil.rmtree("spv")
+
+os.mkdir("spv/")
 
 for name in os.listdir("shaders"):
     path = f"shaders/{name}"

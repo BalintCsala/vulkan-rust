@@ -12,10 +12,7 @@ use crate::{
         image::Image,
         shader::Shader,
         vulkan_utils::{format_to_aspect, mip_level_subresource_range},
-        wrappers::{
-            allocator::Allocator,
-            device::{self, Device},
-        },
+        wrappers::{allocator::Allocator, device::Device},
     },
 };
 
@@ -103,8 +100,6 @@ pub struct IndexData {
 pub struct ImageInfo {
     size: ImageSize,
     usage: vk::ImageUsageFlags,
-    format: vk::Format,
-    mip_levels: u32,
     array_layers: u32,
     name: String,
     image: Image,
@@ -127,6 +122,7 @@ pub struct ResourceManager {
     pub descriptor_set: vk::DescriptorSet,
 
     images: HashMap<ImageReference, ImageInfo>,
+    images_by_name: HashMap<String, ImageReference>,
     next_image_reference: ImageReference,
     samplers: Vec<vk::Sampler>,
 
@@ -295,6 +291,7 @@ impl ResourceManager {
             bindless_pipeline_layout,
 
             images: HashMap::new(),
+            images_by_name: HashMap::new(),
             next_image_reference: 0,
             samplers: Vec::new(),
 
@@ -378,13 +375,12 @@ impl ResourceManager {
             ImageInfo {
                 size: ImageSize::Fixed(1, 1),
                 usage,
-                format: image.format,
-                mip_levels: 1,
                 array_layers: 1,
                 image,
-                name,
+                name: name.clone(),
             },
         );
+        self.images_by_name.insert(name, reference);
 
         reference
     }
@@ -444,15 +440,35 @@ impl ResourceManager {
             ImageInfo {
                 size,
                 usage,
-                format,
-                mip_levels,
                 array_layers,
                 image,
-                name,
+                name: name.clone(),
             },
         );
+        self.images_by_name.insert(name, reference);
 
         reference
+    }
+
+    pub fn get_or_create_image<T>(
+        &mut self,
+        size: ImageSize,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        mip_levels: u32,
+        array_layers: u32,
+        name: String,
+        fallback_contents: &[T],
+    ) -> ImageReference {
+        match self.get_image_reference_by_name(&name) {
+            Some(image_ref) => image_ref,
+            None => {
+                let image_ref =
+                    self.create_empty_image(size, format, usage, mip_levels, array_layers, name);
+                self.upload_image_data(&[(image_ref, fallback_contents)]);
+                image_ref
+            }
+        }
     }
 
     fn dispatch_copy_from_staging(
@@ -567,7 +583,7 @@ impl ResourceManager {
                                 .base_array_layer(0)
                                 .layer_count(1)
                                 .mip_level(0)
-                                .aspect_mask(format_to_aspect(image_info.format)),
+                                .aspect_mask(format_to_aspect(image_info.image.format)),
                         )],
                 );
             };
@@ -577,7 +593,7 @@ impl ResourceManager {
                 vk::AccessFlags2::TRANSFER_WRITE,
                 vk::PipelineStageFlags2::NONE,
                 vk::AccessFlags2::NONE,
-                if image_info.mip_levels > 0 {
+                if image_info.image.get_mip_count() > 0 {
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL
                 } else {
                     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
@@ -593,7 +609,7 @@ impl ResourceManager {
 
         let mipmapped_image_data: Vec<_> = image_data
             .iter()
-            .filter(|(reference, _)| self.images[reference].mip_levels > 1)
+            .filter(|(reference, _)| self.images[reference].image.get_mip_count() > 1)
             .collect();
 
         if !mipmapped_image_data.is_empty() {
@@ -636,7 +652,7 @@ impl ResourceManager {
                             0,
                             bytemuck::bytes_of(&MipmapPushConstant {
                                 base_image_id: *reference as u32,
-                                num_of_mips: info.mip_levels,
+                                num_of_mips: info.image.get_mip_count(),
                             }),
                         );
                     };
@@ -655,7 +671,7 @@ impl ResourceManager {
                 {
                     let mut src_mip_width = extent.width;
                     let mut src_mip_height = extent.height;
-                    for mip_level in 0..info.mip_levels - 1 {
+                    for mip_level in 0..info.image.get_mip_count() - 1 {
                         unsafe {
                             self.device.cmd_pipeline_barrier2(
                                 command_buffer,
@@ -669,7 +685,7 @@ impl ResourceManager {
                                         .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                                         .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                                         .subresource_range(mip_level_subresource_range(
-                                            format_to_aspect(info.format),
+                                            format_to_aspect(info.image.format),
                                             mip_level,
                                             1,
                                         )),
@@ -690,7 +706,7 @@ impl ResourceManager {
                                             vk::ImageSubresourceLayers::default()
                                                 .base_array_layer(0)
                                                 .layer_count(info.array_layers)
-                                                .aspect_mask(format_to_aspect(info.format))
+                                                .aspect_mask(format_to_aspect(info.image.format))
                                                 .mip_level(mip_level),
                                         )
                                         .src_offsets([
@@ -705,7 +721,7 @@ impl ResourceManager {
                                             vk::ImageSubresourceLayers::default()
                                                 .base_array_layer(0)
                                                 .layer_count(info.array_layers)
-                                                .aspect_mask(format_to_aspect(info.format))
+                                                .aspect_mask(format_to_aspect(info.image.format))
                                                 .mip_level(mip_level + 1),
                                         )
                                         .dst_offsets([
@@ -737,8 +753,8 @@ impl ResourceManager {
                                     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                                     .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                                     .subresource_range(mip_level_subresource_range(
-                                        format_to_aspect(info.format),
-                                        info.mip_levels - 1,
+                                        format_to_aspect(info.image.format),
+                                        info.image.get_mip_count() - 1,
                                         1,
                                     )),
                             ]),
@@ -841,10 +857,10 @@ impl ResourceManager {
                     self.allocator.clone(),
                     &self.debug_utils_device,
                     extent,
-                    image_info.format,
+                    image_info.image.format,
                     image_info.usage,
                     image_type,
-                    image_info.mip_levels,
+                    image_info.image.get_mip_count(),
                     image_info.array_layers,
                     &image_info.name,
                 );
@@ -947,6 +963,10 @@ impl ResourceManager {
 
     pub fn get_image_mut(&mut self, reference: &ImageReference) -> &mut Image {
         &mut self.images.get_mut(reference).unwrap().image
+    }
+
+    pub fn get_image_reference_by_name(&self, name: &str) -> Option<ImageReference> {
+        self.images_by_name.get(name).copied()
     }
 }
 

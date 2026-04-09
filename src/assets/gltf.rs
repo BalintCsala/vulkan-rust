@@ -19,7 +19,7 @@ use crate::{
     assets::model::{Model, ModelData},
     rendering::{
         buffer::Buffer,
-        resource_manager::{ImageReference, ResourceManager},
+        resource_manager::{ImageReference, ImageSize, ResourceManager},
         wrappers::{allocator::Allocator, device::Device},
     },
 };
@@ -37,7 +37,6 @@ pub enum Error {
     NoSceneNodes,
     MissingRequiredAttribute,
     InvalidAttribute,
-    InvalidIndexType,
     ImageError,
 }
 
@@ -403,24 +402,88 @@ impl Gltf {
             }
         };
 
-        let (base_color_texture_id, base_color_texcoord_id, base_color_sampler_id) = match primitive
-            .material
-        {
-            Some(material) => match &info.materials.as_ref().unwrap()[material]
+        let base_color_fallback_texture = resource_manager.get_or_create_image(
+            ImageSize::Fixed(1, 1),
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            1,
+            1,
+            "Base color fallback".to_owned(),
+            &[0xFFFFFFFFu32],
+        );
+
+        let normal_fallback_texture = resource_manager.get_or_create_image(
+            ImageSize::Fixed(1, 1),
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            1,
+            1,
+            "Normal fallback".to_owned(),
+            &[0xFF80FF80u32],
+        );
+
+        let metallic_roughness_fallback_texture = resource_manager.get_or_create_image(
+            ImageSize::Fixed(1, 1),
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            1,
+            1,
+            "Metallic roughness fallback".to_owned(),
+            &[0xFF00FF00u32],
+        );
+
+        let emissive_fallback_texture = resource_manager.get_or_create_image(
+            ImageSize::Fixed(1, 1),
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            1,
+            1,
+            "Emissive fallback".to_owned(),
+            &[0xFFFFFFFFu32],
+        );
+
+        let (base_color_texture_id, base_color_texcoord_id, base_color_sampler_id) = (|| {
+            let texture = info.materials.as_ref()?[primitive.material?]
                 .pbr_metallic_roughness
-            {
-                Some(pbr_metallic_roughness) => match &pbr_metallic_roughness.base_color_texture {
-                    Some(base_color_texture) => (
-                        *image_lookup.get(&base_color_texture.index).unwrap_or(&-1),
-                        base_color_texture.tex_coord,
-                        0,
-                    ),
-                    None => (-1, 0, 0),
-                },
-                None => (-1, 0, 0),
-            },
-            None => (-1, 0, 0),
-        };
+                .as_ref()?
+                .base_color_texture
+                .as_ref()?;
+            Some((*image_lookup.get(&texture.index)?, texture.tex_coord, 0))
+        })()
+        .unwrap_or((base_color_fallback_texture, 0, 0));
+
+        let (normal_texture_id, normal_texcoord_id, normal_sampler_id) = (|| {
+            let texture = info.materials.as_ref()?[primitive.material?]
+                .normal_texture
+                .as_ref()?;
+            Some((*image_lookup.get(&texture.index)?, texture.tex_coord, 0))
+        })()
+        .unwrap_or((normal_fallback_texture, 0, 0));
+
+        let (
+            metallic_roughness_texture_id,
+            metallic_roughness_texcoord_id,
+            metallic_roughness_sampler_id,
+        ) = (|| {
+            let texture = info.materials.as_ref()?[primitive.material?]
+                .pbr_metallic_roughness
+                .as_ref()?
+                .metallic_roughness_texture
+                .as_ref()?;
+            Some((*image_lookup.get(&texture.index)?, texture.tex_coord, 0))
+        })()
+        .unwrap_or((metallic_roughness_fallback_texture, 0, 0));
+
+        let (emissive_texture_id, emissive_texcoord_id, emissive_sampler_id) = (|| {
+            let texture = info.materials.as_ref()?[primitive.material?]
+                .emissive_texture
+                .as_ref()?;
+            Some((*image_lookup.get(&texture.index)?, texture.tex_coord, 0))
+        })()
+        .unwrap_or((emissive_fallback_texture, 0, 0));
+
+        let emissive_factor =
+            (|| Some(info.materials.as_ref()?[primitive.material?].emissive_factor))().unwrap();
 
         let model_ref = resource_manager.upload_model(
             ModelData {
@@ -433,9 +496,24 @@ impl Gltf {
                 colors: colors.unwrap_or(0),
                 joints: joints.unwrap_or(0),
                 weights: weights.unwrap_or(0),
+
                 base_color_texture_id,
                 base_color_texcoord_id,
                 base_color_sampler_id,
+
+                normal_texture_id,
+                normal_texcoord_id,
+                normal_sampler_id,
+
+                metallic_roughness_texture_id,
+                metallic_roughness_texcoord_id,
+                metallic_roughness_sampler_id,
+
+                emissive_texture_id,
+                emissive_texcoord_id,
+                emissive_sampler_id,
+
+                emissive_factor,
             },
             indices,
             index_count as u32,
