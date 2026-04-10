@@ -180,7 +180,11 @@ impl VulkanState {
                 .get_physical_device_surface_present_modes(physical_device, surface)
                 .unwrap()
                 .iter()
-                .find(|&present_mode| *present_mode == vk::PresentModeKHR::MAILBOX)
+                .min_by_key(|&present_mode| match *present_mode {
+                    vk::PresentModeKHR::MAILBOX => 0,
+                    vk::PresentModeKHR::FIFO => 1,
+                    _ => u32::MAX,
+                })
                 .unwrap_or(&vk::PresentModeKHR::FIFO)
         };
 
