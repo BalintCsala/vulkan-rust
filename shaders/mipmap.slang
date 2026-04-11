@@ -34,9 +34,10 @@ void cs(uint2 gid: SV_DispatchThreadID, uint2 lid: SV_GroupThreadID) {
         if (inside && all((lid & mask) == 0)) {
             float4 value = sharedMem[lid.x][lid.y] + sharedMem[lid.x + step][lid.y] + sharedMem[lid.x][lid.y + step] +
                            sharedMem[lid.x + step][lid.y];
-            sharedMem[lid.x][lid.y] = value;
             value *= 0.25;
-            getStorageImage<RWTexture2D<float4>>(pushConstants.baseImageId + i + 1)[gid] = value;
+
+            sharedMem[lid.x][lid.y] = value;
+            getStorageImage<RWTexture2D<float4>>(pushConstants.baseImageId + i + 1)[gid / step / 2] = value;
         }
         mask = (mask << 1) | 1;
         step *= 2;

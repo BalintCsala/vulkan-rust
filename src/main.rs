@@ -106,9 +106,9 @@ fn init_rendering(
             .device
             .create_sampler(
                 &vk::SamplerCreateInfo::default()
-                    .min_filter(vk::Filter::NEAREST)
-                    .mag_filter(vk::Filter::NEAREST)
-                    .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                    .min_filter(vk::Filter::LINEAR)
+                    .mag_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
                     .min_lod(0.0)
                     .max_lod(vk::LOD_CLAMP_NONE),
                 None,
