@@ -12,7 +12,6 @@ public struct Barycentrics {
     float3 ddy;
 
     public static Barycentrics fromScreenPoints(float4 p0, float4 p1, float4 p2, float2 ndc, float2 resolution) {
-        // Adapted from http://filmicworlds.com/blog/visibility-buffer-rendering-with-material-graphs/
         Barycentrics ret;
 
         float3 invW = 1.0 / float3(p0.w, p1.w, p2.w);
@@ -21,33 +20,29 @@ public struct Barycentrics {
         float2 ndc1 = p1.xy * invW.y;
         float2 ndc2 = p2.xy * invW.z;
 
-        float invDet = 1.0 / determinant(float2x2(ndc2 - ndc1, ndc0 - ndc1));
-        ret.ddx = float3(ndc1.y - ndc2.y, ndc2.y - ndc0.y, ndc0.y - ndc1.y) * invDet * invW;
-        ret.ddy = float3(ndc2.x - ndc1.x, ndc0.x - ndc2.x, ndc1.x - ndc0.x) * invDet * invW;
-        float ddxSum = dot(ret.ddx, 1.0);
-        float ddySum = dot(ret.ddy, 1.0);
+        float invArea = 1.0 / determinant(float2x2(ndc1 - ndc0, ndc2 - ndc0));
 
-        float2 deltaVec = ndc - ndc0;
-        float interpInvW = invW.x + deltaVec.x * ddxSum + deltaVec.y * ddySum;
-        float interpW = 1.0 / interpInvW;
+        ret.barycentrics.x = ((ndc1.x - ndc.x) * (ndc2.y - ndc.y) - (ndc1.y - ndc.y) * (ndc2.x - ndc.x)) * invArea;
+        ret.barycentrics.y = ((ndc2.x - ndc.x) * (ndc0.y - ndc.y) - (ndc2.y - ndc.y) * (ndc0.x - ndc.x)) * invArea;
+        ret.barycentrics.z = 1.0 - ret.barycentrics.x - ret.barycentrics.y;
 
-        ret.barycentrics.x = interpW * (invW[0] + deltaVec.x * ret.ddx.x + deltaVec.y * ret.ddy.x);
-        ret.barycentrics.y = interpW * (0.0 + deltaVec.x * ret.ddx.y + deltaVec.y * ret.ddy.y);
-        ret.barycentrics.z = interpW * (0.0 + deltaVec.x * ret.ddx.z + deltaVec.y * ret.ddy.z);
+        ret.ddx = float3(ndc1.y - ndc2.y, ndc2.y - ndc0.y, ndc0.y - ndc1.y) * invArea;
+        ret.ddy = float3(ndc2.x - ndc1.x, ndc0.x - ndc2.x, ndc1.x - ndc0.x) * invArea;
 
-        ret.ddx *= 2.0 / resolution.x;
-        ret.ddy *= 2.0 / resolution.y;
-        ddxSum *= 2.0 / resolution.x;
-        ddySum *= 2.0 / resolution.y;
+        float3 num = ret.barycentrics * invW;
+        float denom = dot(num, 1.0);
+        ret.barycentrics = num / denom;
 
-        ret.ddy *= -1.0;
-        ddySum *= -1.0;
+        float3 ddxNum = ret.ddx * invW;
+        float3 ddyNum = ret.ddy * invW;
 
-        float interpW_ddx = 1.0 / (interpInvW + ddxSum);
-        float interpW_ddy = 1.0 / (interpInvW + ddySum);
+        float ddxDenom = dot(ret.ddx * invW, 1.0);
+        float ddyDenom = dot(ret.ddy * invW, 1.0);
 
-        ret.ddx = interpW_ddx * (ret.barycentrics * interpInvW + ret.ddx) - ret.barycentrics;
-        ret.ddy = interpW_ddy * (ret.barycentrics * interpInvW + ret.ddy) - ret.barycentrics;
+        float denom2 = denom * denom;
+
+        ret.ddx = (ddxNum * denom - num * ddxDenom) / denom2 * (2.0 / resolution.x);
+        ret.ddy = (ddyNum * denom - num * ddyDenom) / denom2 * (2.0 / resolution.y);
 
         return ret;
     }
