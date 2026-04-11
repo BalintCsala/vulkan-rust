@@ -175,18 +175,20 @@ impl VulkanState {
                 .unwrap_or(&surface_formats[0])
         };
 
-        let present_mode = unsafe {
-            *surface_instance
-                .get_physical_device_surface_present_modes(physical_device, surface)
-                .unwrap()
-                .iter()
-                .min_by_key(|&present_mode| match *present_mode {
-                    vk::PresentModeKHR::MAILBOX => 0,
-                    vk::PresentModeKHR::FIFO => 1,
-                    _ => u32::MAX,
-                })
-                .unwrap_or(&vk::PresentModeKHR::FIFO)
-        };
+        let present_mode = vk::PresentModeKHR::FIFO;
+
+        // let present_mode = unsafe {
+        //     *surface_instance
+        //         .get_physical_device_surface_present_modes(physical_device, surface)
+        //         .unwrap()
+        //         .iter()
+        //         .min_by_key(|&present_mode| match *present_mode {
+        //             vk::PresentModeKHR::MAILBOX => 0,
+        //             vk::PresentModeKHR::FIFO => 1,
+        //             _ => u32::MAX,
+        //         })
+        //         .unwrap_or(&vk::PresentModeKHR::FIFO)
+        // };
 
         let surface_capabilities = unsafe {
             surface_instance
