@@ -175,24 +175,29 @@ fn keyboard_input(
     let x = camera.local_x();
     let y = camera.local_y();
     let z = camera.local_z();
-    let delta = time.delta_secs() * CAMERA_SPEED;
+    let mut speed = time.delta_secs() * CAMERA_SPEED;
+
+    if keys.pressed(KeyCode::ShiftLeft) | keys.pressed(KeyCode::ControlLeft) {
+        speed *= 2.0;
+    }
+
     if keys.pressed(KeyCode::KeyA) {
-        camera.translation -= x * delta;
+        camera.translation -= x * speed;
     }
     if keys.pressed(KeyCode::KeyD) {
-        camera.translation += x * delta;
+        camera.translation += x * speed;
     }
     if keys.pressed(KeyCode::KeyW) {
-        camera.translation -= z * delta;
+        camera.translation -= z * speed;
     }
     if keys.pressed(KeyCode::KeyS) {
-        camera.translation += z * delta;
+        camera.translation += z * speed;
     }
     if keys.pressed(KeyCode::KeyQ) {
-        camera.translation -= y * delta;
+        camera.translation -= y * speed;
     }
     if keys.pressed(KeyCode::KeyE) {
-        camera.translation += y * delta;
+        camera.translation += y * speed;
     }
 }
 
