@@ -197,28 +197,32 @@ impl Gltf {
             let bin = Arc::new(&bin);
             thread::scope(|scope| {
                 println!("Loading textures...");
-                textures.iter().for_each(|texture| {
-                    let decoded_images = decoded_images.clone();
-                    let bin = bin.clone();
-                    scope.spawn(move || {
-                        if let Some(source) = texture.source {
-                            let image = &images[source];
-                            let buffer_view = &buffer_views[image.buffer_view.unwrap()];
-                            let offset = buffer_view.byte_offset;
-                            let data = bin[offset..offset + buffer_view.byte_length].to_vec();
-                            let mime_type = image.mime_type.as_ref().unwrap();
-                            let format = match mime_type.as_str() {
-                                "image/jpeg" => ImageFormat::Jpeg,
-                                "image/png" => ImageFormat::Png,
-                                _ => panic!("Unrecognized image format: {}", mime_type),
-                            };
-                            let mut img = ImageReader::new(Cursor::new(data));
-                            img.set_format(format);
-                            let img = img.decode().expect("Failed to decode image").into_rgba8();
-                            decoded_images.lock().unwrap().push((source, img));
-                        }
+                textures
+                    .iter()
+                    .enumerate()
+                    .for_each(|(texture_id, texture)| {
+                        let decoded_images = decoded_images.clone();
+                        let bin = bin.clone();
+                        scope.spawn(move || {
+                            if let Some(source) = texture.source {
+                                let image = &images[source];
+                                let buffer_view = &buffer_views[image.buffer_view.unwrap()];
+                                let offset = buffer_view.byte_offset;
+                                let data = bin[offset..offset + buffer_view.byte_length].to_vec();
+                                let mime_type = image.mime_type.as_ref().unwrap();
+                                let format = match mime_type.as_str() {
+                                    "image/jpeg" => ImageFormat::Jpeg,
+                                    "image/png" => ImageFormat::Png,
+                                    _ => panic!("Unrecognized image format: {}", mime_type),
+                                };
+                                let mut img = ImageReader::new(Cursor::new(data));
+                                img.set_format(format);
+                                let img =
+                                    img.decode().expect("Failed to decode image").into_rgba8();
+                                decoded_images.lock().unwrap().push((texture_id, img));
+                            }
+                        });
                     });
-                });
                 println!("Finished loading textures");
             });
 
