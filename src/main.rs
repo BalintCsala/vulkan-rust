@@ -1,4 +1,10 @@
-use std::{collections::VecDeque, fs::File, sync::Arc, time::Instant};
+use std::{
+    collections::VecDeque,
+    fs::File,
+    io::{BufRead, BufReader},
+    sync::Arc,
+    time::Instant,
+};
 
 use ash::vk;
 use bevy::{
@@ -43,7 +49,6 @@ const CAMERA_SENSITIVITY: f32 = 0.003;
 #[derive(Resource)]
 struct RenderingRes {
     device: Arc<Device>,
-    gltf: Gltf,
     last_frame_time: Instant,
     frame: u32,
 }
@@ -116,43 +121,46 @@ fn init_rendering(
             .unwrap()
     };
     resource_manager.add_sampler(sampler);
-    let gltf = Gltf::from_glb(
-        &vulkan_state.device,
-        &vulkan_state.allocator,
-        &vulkan_state.debug_utils_device,
-        &mut resource_manager,
-        &mut File::open("./assets/BistroExterior.glb").unwrap(),
-    )
-    .unwrap();
 
-    let scenes = gltf.scenes.as_ref().unwrap();
-    let scene = &scenes[gltf.scene.unwrap_or(0)];
+    let scene_list = File::open("./assets/scene.txt").unwrap();
+    for line in BufReader::new(scene_list).lines().map_while(Result::ok) {
+        let gltf = Gltf::from_glb(
+            &vulkan_state.device,
+            &vulkan_state.allocator,
+            &vulkan_state.debug_utils_device,
+            &mut resource_manager,
+            &mut File::open(format!("./assets/{line}")).unwrap(),
+        )
+        .unwrap();
 
-    let mut remaining_nodes: VecDeque<_> = scene
-        .nodes
-        .iter()
-        .map(|node_id| (node_id, Mat4::IDENTITY))
-        .collect();
-    while let Some((node_id, parent_transform)) = remaining_nodes.pop_front() {
-        let node = &gltf.nodes[*node_id];
-        let transform = parent_transform * node.model_matrix();
-        if let Some(children) = &node.children {
-            remaining_nodes.extend(children.iter().map(|node_id| (node_id, transform)));
-        }
-        let mesh_id = match node.mesh {
-            Some(mesh) => mesh,
-            None => continue,
-        };
-        // TODO: Add a parent entity for the node
-        for primitive_id in &gltf.meshes[mesh_id].primitives {
-            let primitive = &gltf.primitives[*primitive_id];
-            commands.spawn((Transform::from_matrix(transform), primitive.clone()));
+        let scenes = gltf.scenes.as_ref().unwrap();
+        let scene = &scenes[gltf.scene.unwrap_or(0)];
+
+        let mut remaining_nodes: VecDeque<_> = scene
+            .nodes
+            .iter()
+            .map(|node_id| (node_id, Mat4::IDENTITY))
+            .collect();
+        while let Some((node_id, parent_transform)) = remaining_nodes.pop_front() {
+            let node = &gltf.nodes[*node_id];
+            let transform = parent_transform * node.model_matrix();
+            if let Some(children) = &node.children {
+                remaining_nodes.extend(children.iter().map(|node_id| (node_id, transform)));
+            }
+            let mesh_id = match node.mesh {
+                Some(mesh) => mesh,
+                None => continue,
+            };
+            // TODO: Add a parent entity for the node
+            for primitive_id in &gltf.meshes[mesh_id].primitives {
+                let primitive = &gltf.primitives[*primitive_id];
+                commands.spawn((Transform::from_matrix(transform), primitive.clone()));
+            }
         }
     }
 
     commands.insert_resource(RenderingRes {
         device: vulkan_state.device.clone(),
-        gltf,
         last_frame_time: Instant::now(),
         frame: 0,
     });
