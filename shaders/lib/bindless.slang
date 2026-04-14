@@ -11,17 +11,18 @@ __DynamicResource<__DynamicResourceKind.Sampler> samplers[];
 
 public T getSampledImage<T>(int id)
     where T : IOpaqueDescriptor {
-    return sampledImages[id].asOpaqueDescriptor<T>();
+    return sampledImages[NonUniformResourceIndex(id)].asOpaqueDescriptor<T>();
 }
 
 public T getStorageImage<T>(int id)
     where T : IOpaqueDescriptor {
-    return storageImages[id].asOpaqueDescriptor<T>();
+    return storageImages[NonUniformResourceIndex(id)].asOpaqueDescriptor<T>();
 }
 
 public T getSampler<T>(int id)
     where T : IOpaqueDescriptor {
-    return samplers[id].asOpaqueDescriptor<T>();
+    return samplers[NonUniformResourceIndex(id)].asOpaqueDescriptor<T>();
 }
+
 
 

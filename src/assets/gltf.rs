@@ -19,7 +19,7 @@ use crate::{
     assets::model::{Model, ModelData},
     rendering::{
         buffer::Buffer,
-        resource_manager::{ImageReference, ImageSize, ResourceManager},
+        resource_manager::{ImageReference, ImageSize, ResourceManager, SamplerReference},
         wrappers::{allocator::Allocator, device::Device},
     },
 };
@@ -187,7 +187,68 @@ impl Gltf {
             }
         }
 
-        let mut image_lookup = HashMap::new();
+        let mut sampler_lookup = HashMap::new();
+        if let Some(samplers) = &info.samplers {
+            samplers
+                .iter()
+                .enumerate()
+                .for_each(|(sampler_id, sampler)| {
+                    let mag_filter = match sampler.mag_filter {
+                        Some(9728) => vk::Filter::NEAREST,
+                        Some(9729) => vk::Filter::LINEAR,
+                        None => vk::Filter::LINEAR,
+                        _ => panic!(
+                            "Unhandled mag_filter value: {}",
+                            sampler.mag_filter.unwrap()
+                        ),
+                    };
+                    let (min_filter, mipmap_mode) = match sampler.min_filter {
+                        Some(9728) => (vk::Filter::NEAREST, vk::SamplerMipmapMode::LINEAR),
+                        Some(9729) => (vk::Filter::LINEAR, vk::SamplerMipmapMode::LINEAR),
+                        Some(9984) => (vk::Filter::NEAREST, vk::SamplerMipmapMode::NEAREST),
+                        Some(9985) => (vk::Filter::LINEAR, vk::SamplerMipmapMode::NEAREST),
+                        Some(9986) => (vk::Filter::NEAREST, vk::SamplerMipmapMode::LINEAR),
+                        Some(9987) => (vk::Filter::LINEAR, vk::SamplerMipmapMode::LINEAR),
+                        None => (vk::Filter::LINEAR, vk::SamplerMipmapMode::LINEAR),
+                        _ => panic!(
+                            "Unhandled min_filter value: {}",
+                            sampler.min_filter.unwrap()
+                        ),
+                    };
+                    let address_mode_u = match sampler.wrap_s {
+                        33071 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                        33648 => vk::SamplerAddressMode::MIRRORED_REPEAT,
+                        10497 => vk::SamplerAddressMode::REPEAT,
+                        _ => panic!("Unhandled wrap_s value: {}", sampler.wrap_s),
+                    };
+                    let address_mode_v = match sampler.wrap_t {
+                        33071 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                        33648 => vk::SamplerAddressMode::MIRRORED_REPEAT,
+                        10497 => vk::SamplerAddressMode::REPEAT,
+                        _ => panic!("Unhandled wrap_s value: {}", sampler.wrap_t),
+                    };
+
+                    let sampler = unsafe {
+                        device
+                            .create_sampler(
+                                &vk::SamplerCreateInfo::default()
+                                    .mag_filter(mag_filter)
+                                    .min_filter(min_filter)
+                                    .mipmap_mode(mipmap_mode)
+                                    .address_mode_u(address_mode_u)
+                                    .address_mode_v(address_mode_v)
+                                    .min_lod(0.0)
+                                    .max_lod(vk::LOD_CLAMP_NONE),
+                                None,
+                            )
+                            .unwrap()
+                    };
+                    let sampler_ref = resource_manager.add_sampler(sampler);
+                    sampler_lookup.insert(sampler_id, sampler_ref);
+                });
+        }
+
+        let mut texture_lookup = HashMap::new();
 
         if let Some(textures) = &info.textures
             && let Some(images) = &info.images
@@ -219,7 +280,11 @@ impl Gltf {
                                 img.set_format(format);
                                 let img =
                                     img.decode().expect("Failed to decode image").into_rgba8();
-                                decoded_images.lock().unwrap().push((texture_id, img));
+                                decoded_images.lock().unwrap().push((
+                                    texture_id,
+                                    texture.sampler.unwrap_or(0),
+                                    img,
+                                ));
                             }
                         });
                     });
@@ -231,18 +296,18 @@ impl Gltf {
             let uploads = decoded_images
                 .iter()
                 .enumerate()
-                .map(|(i, (source, img))| {
-                    let reference = resource_manager.create_empty_image(
+                .map(|(i, (texture_id, sampler_id, img))| {
+                    let image_ref = resource_manager.create_empty_image(
                         crate::rendering::resource_manager::ImageSize::Fixed(
                             img.width(),
                             img.height(),
                         ),
-                        if srgb_textures.contains(source) {
+                        if srgb_textures.contains(texture_id) {
                             vk::Format::R8G8B8A8_SRGB
                         } else {
                             vk::Format::R8G8B8A8_UNORM
                         },
-                        if srgb_textures.contains(source) {
+                        if srgb_textures.contains(texture_id) {
                             vk::ImageUsageFlags::SAMPLED
                                 | vk::ImageUsageFlags::TRANSFER_DST
                                 | vk::ImageUsageFlags::TRANSFER_SRC
@@ -255,8 +320,11 @@ impl Gltf {
                         1,
                         format!("Gltf texture #{i}"),
                     );
-                    image_lookup.insert(*source, reference);
-                    (reference, img.iter().as_slice())
+                    texture_lookup.insert(
+                        *texture_id,
+                        (image_ref, *sampler_lookup.get(sampler_id).unwrap_or(&0)),
+                    );
+                    (image_ref, img.iter().as_slice())
                 })
                 .collect::<Vec<_>>();
 
@@ -277,7 +345,7 @@ impl Gltf {
                         allocator,
                         debug_utils_device,
                         resource_manager,
-                        &image_lookup,
+                        &texture_lookup,
                         &info,
                         primitive,
                         &bin,
@@ -311,7 +379,7 @@ impl Gltf {
         allocator: &Arc<Allocator>,
         debug_utils_device: &debug_utils::Device,
         resource_manager: &mut ResourceManager,
-        image_lookup: &HashMap<usize, ImageReference>,
+        texture_lookup: &HashMap<usize, (ImageReference, SamplerReference)>,
         info: &types::Info,
         primitive: &types::Primitive,
         bin: &[u8],
@@ -452,7 +520,9 @@ impl Gltf {
                 .as_ref()?
                 .base_color_texture
                 .as_ref()?;
-            Some((*image_lookup.get(&texture.index)?, texture.tex_coord, 0))
+
+            let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
+            Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
         .unwrap_or((base_color_fallback_texture, 0, 0));
 
@@ -460,7 +530,8 @@ impl Gltf {
             let texture = info.materials.as_ref()?[primitive.material?]
                 .normal_texture
                 .as_ref()?;
-            Some((*image_lookup.get(&texture.index)?, texture.tex_coord, 0))
+            let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
+            Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
         .unwrap_or((normal_fallback_texture, 0, 0));
 
@@ -474,7 +545,8 @@ impl Gltf {
                 .as_ref()?
                 .metallic_roughness_texture
                 .as_ref()?;
-            Some((*image_lookup.get(&texture.index)?, texture.tex_coord, 0))
+            let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
+            Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
         .unwrap_or((metallic_roughness_fallback_texture, 0, 0));
 
@@ -482,7 +554,8 @@ impl Gltf {
             let texture = info.materials.as_ref()?[primitive.material?]
                 .emissive_texture
                 .as_ref()?;
-            Some((*image_lookup.get(&texture.index)?, texture.tex_coord, 0))
+            let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
+            Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
         .unwrap_or((emissive_fallback_texture, 0, 0));
 
