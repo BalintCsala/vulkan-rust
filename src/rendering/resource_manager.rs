@@ -9,8 +9,8 @@ use crate::{
     rendering::{
         buffer::Buffer,
         command_cache::CommandCache,
+        generated_pipelines::{MipmapPipeline, Pipeline},
         image::Image,
-        shader::Shader,
         vulkan_utils::{format_to_aspect, mip_level_subresource_range},
         wrappers::{allocator::Allocator, device::Device},
     },
@@ -138,7 +138,7 @@ pub struct ResourceManager {
     staging_buffer_offset: usize,
     staging_fences: Vec<vk::Fence>,
 
-    mipmap_pipeline: vk::Pipeline,
+    mipmap_pipeline: MipmapPipeline,
 }
 
 impl ResourceManager {
@@ -261,24 +261,7 @@ impl ResourceManager {
                 .unwrap()
         };
 
-        let mipmap_shader_module = Shader::new(device.clone(), "./spv/mipmap.spv").unwrap();
-
-        let mipmap_pipeline = unsafe {
-            device
-                .create_compute_pipelines(
-                    vk::PipelineCache::null(),
-                    &[vk::ComputePipelineCreateInfo::default()
-                        .layout(bindless_pipeline_layout)
-                        .stage(
-                            vk::PipelineShaderStageCreateInfo::default()
-                                .stage(vk::ShaderStageFlags::COMPUTE)
-                                .name(c"cs")
-                                .module(mipmap_shader_module.module),
-                        )],
-                    None,
-                )
-                .unwrap()[0]
-        };
+        let mipmap_pipeline = MipmapPipeline::new(device.clone(), bindless_pipeline_layout);
 
         Self {
             device,
@@ -621,13 +604,7 @@ impl ResourceManager {
             }
 
             let command_buffer = self.command_cache.get_command_buffer();
-            unsafe {
-                self.device.cmd_bind_pipeline(
-                    command_buffer,
-                    vk::PipelineBindPoint::COMPUTE,
-                    self.mipmap_pipeline,
-                );
-            };
+            self.mipmap_pipeline.bind(command_buffer);
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     command_buffer,

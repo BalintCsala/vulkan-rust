@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use ash::vk;
 use bevy::{
     app::{Plugin, PostUpdate, PreStartup, PreUpdate},
@@ -19,11 +17,10 @@ use crate::{
     assets::model::Model,
     rendering::{
         components::camera::Camera,
+        generated_pipelines::{MaterialsPipeline, Pipeline, VisibilityPipeline},
         resource_manager::{ImageReference, ImageSize, InstanceReference, ResourceManager},
-        shader::Shader,
         vulkan_state::VulkanState,
         vulkan_utils::full_subresource_range,
-        wrappers::device::Device,
     },
 };
 
@@ -34,19 +31,17 @@ struct Renderable {
 
 #[derive(Resource)]
 struct RendererState {
-    device: Arc<Device>,
-
     depth_buffer: ImageReference,
 
     visibility_buffer: ImageReference,
-    visibility_pipeline: vk::Pipeline,
+
+    visibility_pipeline: VisibilityPipeline,
+    materials_pipeline: MaterialsPipeline,
 
     base_color_output: ImageReference,
     normal_output: ImageReference,
     metallic_roughness_output: ImageReference,
     emissive_output: ImageReference,
-
-    post_pipeline: vk::Pipeline,
 }
 
 #[repr(C)]
@@ -55,15 +50,6 @@ struct PushConstant {
     view_projection: [f32; 16],
     model_data: vk::DeviceAddress,
     instance_data: vk::DeviceAddress,
-}
-
-impl Drop for RendererState {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_pipeline(self.visibility_pipeline, None);
-            self.device.destroy_pipeline(self.post_pipeline, None);
-        };
-    }
 }
 
 pub struct RendererPlugin;
@@ -99,93 +85,17 @@ fn create_render_resources(
         vulkan_state.extent,
     );
 
-    let visibility_shader = Shader::new(vulkan_state.device.clone(), "spv/visibility.spv").unwrap();
-    let post_shader = Shader::new(vulkan_state.device.clone(), "spv/materials.spv").unwrap();
+    let visibility_pipeline = VisibilityPipeline::new(
+        vulkan_state.device.clone(),
+        resource_manager.bindless_pipeline_layout,
+    );
 
-    let visibility_pipeline = unsafe {
-        vulkan_state
-            .device
-            .create_graphics_pipelines(
-                vk::PipelineCache::null(),
-                &[vk::GraphicsPipelineCreateInfo::default()
-                    .layout(resource_manager.bindless_pipeline_layout)
-                    .stages(&[
-                        vk::PipelineShaderStageCreateInfo::default()
-                            .name(c"vs")
-                            .stage(vk::ShaderStageFlags::VERTEX)
-                            .module(visibility_shader.module),
-                        vk::PipelineShaderStageCreateInfo::default()
-                            .name(c"fs")
-                            .stage(vk::ShaderStageFlags::FRAGMENT)
-                            .module(visibility_shader.module),
-                    ])
-                    .vertex_input_state(&vk::PipelineVertexInputStateCreateInfo::default())
-                    .input_assembly_state(
-                        &vk::PipelineInputAssemblyStateCreateInfo::default()
-                            .topology(vk::PrimitiveTopology::TRIANGLE_LIST),
-                    )
-                    .multisample_state(
-                        &vk::PipelineMultisampleStateCreateInfo::default()
-                            .rasterization_samples(vk::SampleCountFlags::TYPE_1),
-                    )
-                    .rasterization_state(
-                        &vk::PipelineRasterizationStateCreateInfo::default()
-                            .line_width(1.0)
-                            .cull_mode(vk::CullModeFlags::BACK)
-                            .front_face(vk::FrontFace::COUNTER_CLOCKWISE),
-                    )
-                    .dynamic_state(
-                        &vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&[
-                            vk::DynamicState::VIEWPORT,
-                            vk::DynamicState::SCISSOR,
-                        ]),
-                    )
-                    .viewport_state(
-                        &vk::PipelineViewportStateCreateInfo::default()
-                            .viewport_count(1)
-                            .scissor_count(1),
-                    )
-                    .color_blend_state(
-                        &vk::PipelineColorBlendStateCreateInfo::default()
-                            .attachments(&[vk::PipelineColorBlendAttachmentState::default()
-                                .color_write_mask(vk::ColorComponentFlags::RGBA)]),
-                    )
-                    .depth_stencil_state(
-                        &vk::PipelineDepthStencilStateCreateInfo::default()
-                            .depth_write_enable(true)
-                            .depth_test_enable(true)
-                            .depth_compare_op(vk::CompareOp::LESS),
-                    )
-                    .push_next(
-                        &mut vk::PipelineRenderingCreateInfo::default()
-                            .color_attachment_formats(&[vk::Format::R32_UINT])
-                            .depth_attachment_format(vk::Format::D32_SFLOAT),
-                    )],
-                None,
-            )
-            .unwrap()[0]
-    };
-
-    let post_pipeline = unsafe {
-        vulkan_state
-            .device
-            .create_compute_pipelines(
-                vk::PipelineCache::null(),
-                &[vk::ComputePipelineCreateInfo::default()
-                    .layout(resource_manager.bindless_pipeline_layout)
-                    .stage(
-                        vk::PipelineShaderStageCreateInfo::default()
-                            .name(c"cs")
-                            .stage(vk::ShaderStageFlags::COMPUTE)
-                            .module(post_shader.module),
-                    )],
-                None,
-            )
-            .unwrap()[0]
-    };
+    let materials_pipeline = MaterialsPipeline::new(
+        vulkan_state.device.clone(),
+        resource_manager.bindless_pipeline_layout,
+    );
 
     commands.insert_resource(RendererState {
-        device: vulkan_state.device.clone(),
         depth_buffer: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
             vk::Format::D32_SFLOAT,
@@ -205,7 +115,9 @@ fn create_render_resources(
             1,
             "Visibility buffer".to_owned(),
         ),
+
         visibility_pipeline,
+        materials_pipeline,
 
         base_color_output: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
@@ -241,8 +153,6 @@ fn create_render_resources(
             1,
             "Emissive material texture".to_owned(),
         ),
-
-        post_pipeline,
     });
     commands.insert_resource(resource_manager);
     commands.insert_resource(vulkan_state);
@@ -410,11 +320,8 @@ fn render(
             0,
             bytemuck::bytes_of(&push_constants),
         );
-        device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            renderer_state.visibility_pipeline,
-        );
+
+        renderer_state.visibility_pipeline.bind(command_buffer);
 
         for (model, renderable) in renderables {
             let index_data = resource_manager.get_index_data(model.model_ref);
@@ -436,11 +343,7 @@ fn render(
 
         device.cmd_end_rendering(command_buffer);
 
-        device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            renderer_state.post_pipeline,
-        );
+        renderer_state.materials_pipeline.bind(command_buffer);
 
         resource_manager
             .get_image_mut(&renderer_state.base_color_output)

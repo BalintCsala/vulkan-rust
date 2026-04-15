@@ -1,0 +1,9 @@
+{
+  "structName": "MaterialsPipeline",
+  "shaderPath": "shaders/materials.slang",
+  "shaderInfo": {
+    "type": "compute",
+    "entry": "cs"
+  },
+  "inputs": []
+}

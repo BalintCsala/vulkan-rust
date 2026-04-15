@@ -6,7 +6,6 @@ use std::{
     time::Instant,
 };
 
-use ash::vk;
 use bevy::{
     MinimalPlugins,
     a11y::AccessibilityPlugin,

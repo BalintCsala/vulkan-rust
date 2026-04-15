@@ -1,0 +1,9 @@
+{
+  "structName": "MipmapPipeline",
+  "shaderPath": "shaders/mipmap.slang",
+  "shaderInfo": {
+    "type": "compute",
+    "entry": "cs"
+  },
+  "inputs": []
+}

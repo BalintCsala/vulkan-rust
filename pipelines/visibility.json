@@ -1,0 +1,12 @@
+{
+  "structName": "VisibilityPipeline",
+  "shaderPath": "shaders/visibility.slang",
+  "shaderInfo": {
+    "type": "graphics",
+    "vertex": "vs",
+    "fragment": "fs",
+    "colorAttachments": ["r32ui"],
+    "depthAttachment": "d32sfloat"
+  },
+  "inputs": []
+}
