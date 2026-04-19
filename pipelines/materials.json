@@ -5,5 +5,42 @@
     "type": "compute",
     "entry": "cs"
   },
-  "inputs": []
+  "inputs": [
+    {
+      "type": "float4x4",
+      "name": "view_projection"
+    },
+    {
+      "type": "buffer",
+      "name": "model_data"
+    },
+    {
+      "type": "buffer",
+      "name": "instance_data"
+    },
+    {
+      "type": "float2",
+      "name": "resolution"
+    },
+    {
+      "type": "storageImage",
+      "name": "visibility_buffer_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "base_color_output_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "normal_output_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "metallic_roughness_output_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "emissive_output_id"
+    }
+  ]
 }

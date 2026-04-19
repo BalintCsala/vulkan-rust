@@ -5,5 +5,14 @@
     "type": "compute",
     "entry": "cs"
   },
-  "inputs": []
+  "inputs": [
+    {
+      "type": "storageImage",
+      "name": "base_image_id"
+    },
+    {
+      "type": "uint",
+      "name": "num_of_mips"
+    }
+  ]
 }

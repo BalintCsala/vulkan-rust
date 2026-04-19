@@ -9,7 +9,7 @@ use crate::{
     rendering::{
         buffer::Buffer,
         command_cache::CommandCache,
-        generated_pipelines::{MipmapPipeline, Pipeline},
+        generated_pipelines::{MipmapPipeline, MipmapPipelinePushConstants, Pipeline},
         image::Image,
         vulkan_utils::{format_to_aspect, mip_level_subresource_range},
         wrappers::{allocator::Allocator, device::Device},
@@ -596,13 +596,6 @@ impl ResourceManager {
             .collect();
 
         if !mipmapped_image_data.is_empty() {
-            #[repr(C)]
-            #[derive(Clone, Copy, Pod, Zeroable)]
-            struct MipmapPushConstant {
-                base_image_id: u32,
-                num_of_mips: u32,
-            }
-
             let command_buffer = self.command_cache.get_command_buffer();
             self.mipmap_pipeline.bind(command_buffer);
             unsafe {
@@ -627,8 +620,8 @@ impl ResourceManager {
                             self.bindless_pipeline_layout,
                             vk::ShaderStageFlags::ALL,
                             0,
-                            bytemuck::bytes_of(&MipmapPushConstant {
-                                base_image_id: *reference as u32,
+                            bytemuck::bytes_of(&MipmapPipelinePushConstants {
+                                base_image_id: *reference as i32,
                                 num_of_mips: info.image.get_mip_count(),
                             }),
                         );

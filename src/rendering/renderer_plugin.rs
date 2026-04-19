@@ -17,7 +17,10 @@ use crate::{
     assets::model::Model,
     rendering::{
         components::camera::Camera,
-        generated_pipelines::{MaterialsPipeline, Pipeline, VisibilityPipeline},
+        generated_pipelines::{
+            MaterialsPipeline, MaterialsPipelinePushConstants, Pipeline, VisibilityPipeline,
+            VisibilityPipelinePushConstants,
+        },
         resource_manager::{ImageReference, ImageSize, InstanceReference, ResourceManager},
         vulkan_state::VulkanState,
         vulkan_utils::full_subresource_range,
@@ -42,14 +45,6 @@ struct RendererState {
     normal_output: ImageReference,
     metallic_roughness_output: ImageReference,
     emissive_output: ImageReference,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-struct PushConstant {
-    view_projection: [f32; 16],
-    model_data: vk::DeviceAddress,
-    instance_data: vk::DeviceAddress,
 }
 
 pub struct RendererPlugin;
@@ -306,7 +301,7 @@ fn render(
                         }),
                 ),
         );
-        let mut push_constants = PushConstant {
+        let mut push_constants = VisibilityPipelinePushConstants {
             view_projection: [0.0; 16],
             model_data: resource_manager.model_buffer.address,
             instance_data: resource_manager.instance_buffer.address,
@@ -377,22 +372,7 @@ fn render(
                 vk::ImageLayout::GENERAL,
             );
 
-        #[repr(C)]
-        #[derive(Copy, Clone, Pod, Zeroable)]
-        struct PostPushConstants {
-            view_projection: [f32; 16],
-            model_data: vk::DeviceAddress,
-            instance_data: vk::DeviceAddress,
-            resolution: [f32; 2],
-            visibility_buffer_id: i32,
-            base_color_output_id: i32,
-            normal_output_id: i32,
-            metallic_roughness_output_id: i32,
-            emissive_output_id: i32,
-            _pad: i32,
-        }
-
-        let mut post_push_constants = PostPushConstants {
+        let mut materials_push_constants = MaterialsPipelinePushConstants {
             view_projection: [0.0; 16],
             model_data: resource_manager.model_buffer.address,
             instance_data: resource_manager.instance_buffer.address,
@@ -405,16 +385,17 @@ fn render(
             normal_output_id: renderer_state.normal_output.into(),
             metallic_roughness_output_id: renderer_state.metallic_roughness_output.into(),
             emissive_output_id: renderer_state.emissive_output.into(),
-            _pad: 0,
+            _pad0: 0,
         };
-        view_projection.write_cols_to_slice(post_push_constants.view_projection.as_mut_slice());
+        view_projection
+            .write_cols_to_slice(materials_push_constants.view_projection.as_mut_slice());
 
         device.cmd_push_constants(
             command_buffer,
             resource_manager.bindless_pipeline_layout,
             vk::ShaderStageFlags::ALL,
             0,
-            bytemuck::bytes_of(&post_push_constants),
+            bytemuck::bytes_of(&materials_push_constants),
         );
 
         device.cmd_dispatch(

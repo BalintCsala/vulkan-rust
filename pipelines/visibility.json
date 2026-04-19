@@ -8,5 +8,18 @@
     "colorAttachments": ["r32ui"],
     "depthAttachment": "d32sfloat"
   },
-  "inputs": []
+  "inputs": [
+    {
+      "type": "float4x4",
+      "name": "view_projection"
+    },
+    {
+      "type": "buffer",
+      "name": "model_data"
+    },
+    {
+      "type": "buffer",
+      "name": "instance_data"
+    }
+  ]
 }

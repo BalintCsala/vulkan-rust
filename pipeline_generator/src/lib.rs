@@ -57,8 +57,86 @@ enum ShaderInfo {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum PipelineInput {}
+#[serde(rename_all = "camelCase")]
+enum PipelineInputType {
+    StorageImage,
+    SampledImage,
+    Sampler,
+    Buffer,
+    Float,
+    Float2,
+    Float3,
+    Float4,
+    Float3x3,
+    Float4x4,
+    Uint,
+}
+
+impl PipelineInputType {
+    pub fn alignment(&self) -> u32 {
+        match self {
+            PipelineInputType::StorageImage => 4,
+            PipelineInputType::SampledImage => 4,
+            PipelineInputType::Sampler => 4,
+            PipelineInputType::Buffer => 8,
+            PipelineInputType::Float => 4,
+            PipelineInputType::Float2 => 4,
+            PipelineInputType::Float3 => 4,
+            PipelineInputType::Float4 => 4,
+            PipelineInputType::Float3x3 => 4,
+            PipelineInputType::Float4x4 => 4,
+            PipelineInputType::Uint => 4,
+        }
+    }
+
+    pub fn size(&self) -> u32 {
+        match self {
+            PipelineInputType::StorageImage => 4,
+            PipelineInputType::SampledImage => 4,
+            PipelineInputType::Sampler => 4,
+            PipelineInputType::Buffer => 8,
+            PipelineInputType::Float => 4,
+            PipelineInputType::Float2 => 8,
+            PipelineInputType::Float3 => 12,
+            PipelineInputType::Float4 => 16,
+            PipelineInputType::Float3x3 => 36,
+            PipelineInputType::Float4x4 => 64,
+            PipelineInputType::Uint => 4,
+        }
+    }
+
+    pub fn to_code(&self) -> TokenStream {
+        match self {
+            PipelineInputType::StorageImage => quote! { i32 },
+            PipelineInputType::SampledImage => quote! { i32 },
+            PipelineInputType::Sampler => quote! { i32 },
+            PipelineInputType::Buffer => quote! { vk::DeviceAddress },
+            PipelineInputType::Float => quote! { f32 },
+            PipelineInputType::Float2 => quote! { [f32; 2] },
+            PipelineInputType::Float3 => quote! { [f32; 3] },
+            PipelineInputType::Float4 => quote! { [f32; 4] },
+            PipelineInputType::Float3x3 => quote! { [f32; 9] },
+            PipelineInputType::Float4x4 => quote! { [f32; 16] },
+            PipelineInputType::Uint => quote! { u32 },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PipelineInput {
+    #[serde(rename = "type")]
+    ty: PipelineInputType,
+    name: String,
+}
+
+impl PipelineInput {
+    pub fn to_code(&self) -> TokenStream {
+        let ident = format_ident!("{}", self.name);
+        let ty = self.ty.to_code();
+        quote! { pub #ident: #ty }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,17 +147,26 @@ struct PipelineDefinition {
     inputs: Vec<PipelineInput>,
 }
 
+fn create_padding(size: u32, name: &str) -> TokenStream {
+    let ident = format_ident!("{}", name);
+    match size {
+        1 => quote! { pub #ident: u8 },
+        2 => quote! { pub #ident: u16 },
+        4 => quote! { pub #ident: u32 },
+        _ => panic!("Can't pad by {} bytes", size),
+    }
+}
+
 pub fn generate_pipeline_code() -> String {
     let pipeline_files = fs::read_dir("./pipelines/").unwrap();
 
     let mut source = prettyplease::unparse(
         &syn::parse2(quote! {
-            use std::{fs::File, sync::Arc, mem, path::PathBuf, process::Command};
-
             use ash::{util::read_spv, vk};
+            use std::{fs::File, sync::Arc, mem, path::PathBuf, process::Command};
+            use bytemuck::{Pod, Zeroable};
 
             use crate::rendering::{wrappers::device::Device};
-
 
             fn compile_shader(path: &str) -> Vec<u32> {
                 let path = PathBuf::from(path);
@@ -117,6 +204,43 @@ pub fn generate_pipeline_code() -> String {
         let struct_name = format_ident!("{}", definition.struct_name);
         let push_constants_struct_name = format_ident!("{struct_name}PushConstants");
         let shader_source_path = definition.shader_path;
+
+        let mut push_constant_fields = Vec::new();
+        if !definition.inputs.is_empty() {
+            let mut offset = 0u32;
+            let mut required_pads = 0u32;
+            let mut max_alignment = 0;
+            for input in definition.inputs {
+                max_alignment = max_alignment.max(input.ty.alignment());
+                let required_padding =
+                    offset.div_ceil(input.ty.alignment()) * input.ty.alignment() - offset;
+                if required_padding != 0 {
+                    push_constant_fields.push(create_padding(
+                        required_padding,
+                        &format!("_pad{}", required_pads),
+                    ));
+                    required_pads += 1;
+                    offset += required_padding;
+                }
+                push_constant_fields.push(input.to_code());
+                offset += input.ty.size();
+            }
+            let required_end_padding = offset.div_ceil(max_alignment) * max_alignment - offset;
+            if required_end_padding > 0 {
+                push_constant_fields.push(create_padding(
+                    required_end_padding,
+                    &format!("_pad{}", required_pads),
+                ));
+                offset += required_end_padding;
+            }
+
+            if offset > 256 {
+                panic!(
+                    "Push constants for {} take up {} > 256 bytes",
+                    struct_name, offset
+                );
+            }
+        }
 
         let bind_point = match definition.shader_info {
             ShaderInfo::Compute { entry: _ } => quote! { vk::PipelineBindPoint::COMPUTE  },
@@ -242,8 +366,10 @@ pub fn generate_pipeline_code() -> String {
 
         source.push_str(&prettyplease::unparse(
             &syn::parse2(quote! {
+                #[repr(C)]
+                #[derive(Copy, Clone, Pod, Zeroable)]
                 pub struct #push_constants_struct_name {
-
+                    #(#push_constant_fields),*
                 }
 
                 pub struct #struct_name {
