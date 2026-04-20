@@ -82,12 +82,12 @@ public struct ModelData {
             var tangent2 = tangents[index2];
             tangent = barycentrics.interpolateWithoutDerivatives(tangent0, tangent1, tangent2);
         } else {
-            float3 normal = normalize(cross(position1 - position0, position2 - position0));
             float3 edge0 = position1 - position0;
             float3 edge1 = position2 - position0;
             tangent = (duv1.y * edge0 - duv0.y * edge1) / (duv0.x * duv1.y - duv1.x * duv0.y);
         }
         var bitangent = normalize(cross(tangent, normal));
+        tangent = normalize(cross(normal, bitangent));
         fragmentData.tbn = float3x3(tangent, bitangent, normal);
 
         return fragmentData;
@@ -96,7 +96,7 @@ public struct ModelData {
 
 public struct InstanceData {
     public float4x4 modelMatrix;
-    public float4x4 normalMatrix;
+    public float3x3 normalMatrix;
     public uint modelId;
 };
 

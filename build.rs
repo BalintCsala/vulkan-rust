@@ -7,6 +7,5 @@ fn main() {
     let dest_path = std::path::Path::new(&out_dir).join("generated_pipelines.rs");
     fs::write(&dest_path, generated_pipelines_source).unwrap();
 
-    println!("cargo-rerun-if-changed=shaders/");
     println!("cargo-rerun-if-changed=pipelines/");
 }

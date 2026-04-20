@@ -63,21 +63,21 @@ void cs(uint2 gid: SV_DispatchThreadID) {
     var sampler = getSampler<SamplerState>(0);
 
     var fragmentData = model.getFragmentData(index0, index1, index2, position0, position1, position2, barycentrics);
-    fragmentData.tbn = mul(float3x3(instance.normalMatrix), fragmentData.tbn);
+    fragmentData.tbn = mul(instance.normalMatrix, fragmentData.tbn);
 
     var baseColorUV = fragmentData.uvs[model.baseColorTexcoordId];
     baseColorOutput[gid] = baseColorTexture.SampleGrad(sampler, baseColorUV.value, baseColorUV.ddx, baseColorUV.ddy);
 
     var normalUV = fragmentData.uvs[model.normalTexcoordId];
     var normal = normalTexture.SampleGrad(sampler, normalUV.value, normalUV.ddx, normalUV.ddy).xyz * 2.0 - 1.0;
-    normal = mul(fragmentData.tbn, normal);
-    normalOutput[gid] = float4(octahedron::encode(fragmentData.tbn[2]), octahedron::encode(normal));
+    normal = normalize(mul(normal, fragmentData.tbn));
+    normalOutput[gid] = float4(octahedron::encode(normalize(fragmentData.tbn[2])), octahedron::encode(normal));
 
     var metallicRoughnessUV = fragmentData.uvs[model.metallicRoughnessTexcoordId];
     metallicRoughnessOutput[gid] =
         metallicRoughnessTexture
             .SampleGrad(sampler, metallicRoughnessUV.value, metallicRoughnessUV.ddx, metallicRoughnessUV.ddy)
-            .xy;
+            .bg;
 
     var emissiveUV = fragmentData.uvs[model.emissiveTexcoordId];
     emissiveOutput[gid] =

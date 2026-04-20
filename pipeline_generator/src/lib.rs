@@ -179,7 +179,9 @@ pub fn generate_pipeline_code() -> String {
                     .arg("-o")
                     .arg(&out_path)
                     .spawn()
-                    .expect("Failed to build shader {path}");
+                    .expect("Failed to build shader {path}")
+                    .wait()
+                    .unwrap();
 
                 println!("{:?}", out_path);
 

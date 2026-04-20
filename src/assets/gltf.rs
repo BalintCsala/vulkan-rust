@@ -238,7 +238,7 @@ impl Gltf {
                                     .address_mode_u(address_mode_u)
                                     .address_mode_v(address_mode_v)
                                     .min_lod(0.0)
-                                    .max_lod(vk::LOD_CLAMP_NONE),
+                                    .max_lod(6.0),
                                 None,
                             )
                             .unwrap()
@@ -303,7 +303,7 @@ impl Gltf {
                             img.height(),
                         ),
                         if srgb_textures.contains(texture_id) {
-                            vk::Format::R8G8B8A8_SRGB
+                            vk::Format::R8G8B8A8_UNORM // TODO: SRGB
                         } else {
                             vk::Format::R8G8B8A8_UNORM
                         },

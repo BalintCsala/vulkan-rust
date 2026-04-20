@@ -1,0 +1,54 @@
+{
+  "structName": "DirectLightingPipeline",
+  "shaderPath": "shaders/direct_lighting.slang",
+  "shaderInfo": {
+    "type": "compute",
+    "entry": "cs"
+  },
+  "inputs": [
+    {
+      "type": "float4x4",
+      "name": "view_projection_inverse"
+    },
+    {
+      "type": "storageImage",
+      "name": "depth_texture_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "base_color_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "normal_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "metallic_roughness_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "emissive_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "output_id"
+    },
+    {
+      "type": "float3",
+      "name": "sun_direction"
+    },
+    {
+      "type": "float3",
+      "name": "sun_light"
+    },
+    {
+      "type": "float3",
+      "name": "camera_position"
+    },
+    {
+      "type": "float2",
+      "name": "resolution"
+    }
+  ]
+}

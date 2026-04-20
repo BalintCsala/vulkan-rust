@@ -8,22 +8,22 @@ use bevy::{
         resource::Resource,
         system::{Commands, Query, Res, ResMut, Single},
     },
+    math::Vec3,
     transform::components::Transform,
     window::{RawHandleWrapperHolder, Window},
 };
-use bytemuck::{Pod, Zeroable};
 
 use crate::{
     assets::model::Model,
     rendering::{
         components::camera::Camera,
         generated_pipelines::{
-            MaterialsPipeline, MaterialsPipelinePushConstants, Pipeline, VisibilityPipeline,
+            DirectLightingPipeline, DirectLightingPipelinePushConstants, MaterialsPipeline,
+            MaterialsPipelinePushConstants, Pipeline, VisibilityPipeline,
             VisibilityPipelinePushConstants,
         },
         resource_manager::{ImageReference, ImageSize, InstanceReference, ResourceManager},
         vulkan_state::VulkanState,
-        vulkan_utils::full_subresource_range,
     },
 };
 
@@ -45,6 +45,8 @@ struct RendererState {
     normal_output: ImageReference,
     metallic_roughness_output: ImageReference,
     emissive_output: ImageReference,
+    direct_lighting: i16,
+    direct_lighting_pipeline: DirectLightingPipeline,
 }
 
 pub struct RendererPlugin;
@@ -90,11 +92,16 @@ fn create_render_resources(
         resource_manager.bindless_pipeline_layout,
     );
 
+    let direct_lighting_pipeline = DirectLightingPipeline::new(
+        vulkan_state.device.clone(),
+        resource_manager.bindless_pipeline_layout,
+    );
+
     commands.insert_resource(RendererState {
         depth_buffer: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
             vk::Format::D32_SFLOAT,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::STORAGE,
             1,
             1,
             "Depth buffer".to_owned(),
@@ -113,13 +120,12 @@ fn create_render_resources(
 
         visibility_pipeline,
         materials_pipeline,
+        direct_lighting_pipeline,
 
         base_color_output: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
             vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::STORAGE
-                | vk::ImageUsageFlags::TRANSFER_SRC
-                | vk::ImageUsageFlags::TRANSFER_DST,
+            vk::ImageUsageFlags::STORAGE,
             1,
             1,
             "Base color material texture".to_owned(),
@@ -147,6 +153,14 @@ fn create_render_resources(
             1,
             1,
             "Emissive material texture".to_owned(),
+        ),
+        direct_lighting: resource_manager.create_empty_image(
+            ImageSize::Scaled(1.0, 1.0),
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
+            1,
+            1,
+            "Direct lighting".to_owned(),
         ),
     });
     commands.insert_resource(resource_manager);
@@ -340,38 +354,6 @@ fn render(
 
         renderer_state.materials_pipeline.bind(command_buffer);
 
-        resource_manager
-            .get_image_mut(&renderer_state.base_color_output)
-            .immediate_transition(
-                command_buffer,
-                vk::PipelineStageFlags2::BLIT,
-                vk::AccessFlags2::TRANSFER_READ,
-                vk::PipelineStageFlags2::CLEAR,
-                vk::AccessFlags2::TRANSFER_WRITE,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            );
-        device.cmd_clear_color_image(
-            command_buffer,
-            resource_manager
-                .get_image(&renderer_state.base_color_output)
-                .handle,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 0.0],
-            },
-            &[full_subresource_range(vk::ImageAspectFlags::COLOR)],
-        );
-        resource_manager
-            .get_image_mut(&renderer_state.base_color_output)
-            .immediate_transition(
-                command_buffer,
-                vk::PipelineStageFlags2::CLEAR,
-                vk::AccessFlags2::TRANSFER_WRITE,
-                vk::PipelineStageFlags2::COMPUTE_SHADER,
-                vk::AccessFlags2::SHADER_WRITE,
-                vk::ImageLayout::GENERAL,
-            );
-
         let mut materials_push_constants = MaterialsPipelinePushConstants {
             view_projection: [0.0; 16],
             model_data: resource_manager.model_buffer.address,
@@ -400,8 +382,77 @@ fn render(
 
         device.cmd_dispatch(
             command_buffer,
-            vulkan_state.extent.width / 8,
-            vulkan_state.extent.height / 8,
+            vulkan_state.extent.width.div_ceil(8),
+            vulkan_state.extent.height.div_ceil(8),
+            1,
+        );
+
+        device.cmd_pipeline_barrier2(
+            command_buffer,
+            &vk::DependencyInfo::default().image_memory_barriers(
+                &[
+                    renderer_state.base_color_output,
+                    renderer_state.normal_output,
+                    renderer_state.normal_output,
+                    renderer_state.emissive_output,
+                ]
+                .iter()
+                .map(|id| {
+                    resource_manager.get_image_mut(id).get_transition_barrier(
+                        vk::PipelineStageFlags2::COMPUTE_SHADER,
+                        vk::AccessFlags2::SHADER_WRITE,
+                        vk::PipelineStageFlags2::COMPUTE_SHADER,
+                        vk::AccessFlags2::SHADER_READ,
+                        vk::ImageLayout::GENERAL,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            ),
+        );
+
+        renderer_state.direct_lighting_pipeline.bind(command_buffer);
+        let mut direct_lighting_push_constants = DirectLightingPipelinePushConstants {
+            view_projection_inverse: [0.0; 16],
+            depth_texture_id: renderer_state.depth_buffer.into(),
+            base_color_id: renderer_state.base_color_output.into(),
+            normal_id: renderer_state.normal_output.into(),
+            metallic_roughness_id: renderer_state.metallic_roughness_output.into(),
+            emissive_id: renderer_state.emissive_output.into(),
+            output_id: renderer_state.direct_lighting.into(),
+            sun_direction: [0.0; 3],
+            sun_light: [4.0, 4.0, 4.0],
+            camera_position: [0.0; 3],
+            resolution: [
+                vulkan_state.extent.width as f32,
+                vulkan_state.extent.height as f32,
+            ],
+        };
+
+        view_projection.inverse().write_cols_to_slice(
+            direct_lighting_push_constants
+                .view_projection_inverse
+                .as_mut_slice(),
+        );
+        Vec3::new(1.0, 3.0, 2.0)
+            .normalize()
+            .write_to_slice(direct_lighting_push_constants.sun_direction.as_mut_slice());
+        camera_transform.translation.write_to_slice(
+            direct_lighting_push_constants
+                .camera_position
+                .as_mut_slice(),
+        );
+
+        device.cmd_push_constants(
+            command_buffer,
+            resource_manager.bindless_pipeline_layout,
+            vk::ShaderStageFlags::ALL,
+            0,
+            bytemuck::bytes_of(&direct_lighting_push_constants),
+        );
+        device.cmd_dispatch(
+            command_buffer,
+            vulkan_state.extent.width.div_ceil(8),
+            vulkan_state.extent.height.div_ceil(8),
             1,
         );
 
@@ -414,9 +465,8 @@ fn render(
             vk::AccessFlags2::TRANSFER_WRITE,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         );
-
         resource_manager
-            .get_image_mut(&renderer_state.base_color_output)
+            .get_image_mut(&renderer_state.direct_lighting)
             .immediate_transition(
                 command_buffer,
                 vk::PipelineStageFlags2::COMPUTE_SHADER,
@@ -426,7 +476,7 @@ fn render(
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             );
 
-        let source_image = resource_manager.get_image(&renderer_state.base_color_output);
+        let source_image = resource_manager.get_image(&renderer_state.direct_lighting);
         device.cmd_blit_image(
             command_buffer,
             source_image.handle,
@@ -467,6 +517,16 @@ fn render(
             vk::Filter::NEAREST,
         );
     };
+    resource_manager
+        .get_image_mut(&renderer_state.direct_lighting)
+        .immediate_transition(
+            command_buffer,
+            vk::PipelineStageFlags2::BLIT,
+            vk::AccessFlags2::NONE,
+            vk::PipelineStageFlags2::COMPUTE_SHADER,
+            vk::AccessFlags2::NONE,
+            vk::ImageLayout::GENERAL,
+        );
 
     vulkan_state.current_image().immediate_transition(
         command_buffer,

@@ -1,7 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use ash::{ext::debug_utils, vk};
-use bevy::{ecs::resource::Resource, math::Mat4};
+use bevy::{
+    ecs::resource::Resource,
+    math::{Mat3, Mat4},
+};
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
@@ -88,7 +91,7 @@ pub type InstanceReference = u16;
 #[repr(C)]
 struct InstanceData {
     model: [f32; 16],
-    normal: [f32; 16],
+    normal: [f32; 9],
     model_id: u32,
 }
 
@@ -793,11 +796,11 @@ impl ResourceManager {
 
         let mut instance_data = InstanceData {
             model: [0.0; 16],
-            normal: [0.0; 16],
+            normal: [0.0; 9],
             model_id: (*model_ref) as u32,
         };
         model_matrix.write_cols_to_slice(&mut instance_data.model);
-        model_matrix
+        Mat3::from_mat4(*model_matrix)
             .transpose()
             .inverse()
             .write_cols_to_slice(&mut instance_data.normal);
