@@ -5,7 +5,6 @@ use bevy::{
     ecs::resource::Resource,
     math::{Mat3, Mat4},
 };
-use bytemuck::{Pod, Zeroable};
 
 use crate::{
     assets::model::ModelData,

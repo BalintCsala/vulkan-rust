@@ -60,28 +60,33 @@ void cs(uint2 gid: SV_DispatchThreadID) {
     var metallicRoughnessTexture = getSampledImage<Texture2D<float4>>(model.metallicRoughnessTextureId);
     var emissiveTexture = getSampledImage<Texture2D<float4>>(model.emissiveTextureId);
 
-    var sampler = getSampler<SamplerState>(0);
+    var baseColorSampler = getSampler<SamplerState>(model.baseColorSamplerId);
+    var normalSampler = getSampler<SamplerState>(model.normalSamplerId);
+    var metallicRoughnessSampler = getSampler<SamplerState>(model.metallicRoughnessSamplerId);
+    var emissiveSampler = getSampler<SamplerState>(model.emissiveSamplerId);
 
     var fragmentData = model.getFragmentData(index0, index1, index2, position0, position1, position2, barycentrics);
     fragmentData.tbn = mul(instance.normalMatrix, fragmentData.tbn);
 
     var baseColorUV = fragmentData.uvs[model.baseColorTexcoordId];
-    baseColorOutput[gid] = baseColorTexture.SampleGrad(sampler, baseColorUV.value, baseColorUV.ddx, baseColorUV.ddy);
+    baseColorOutput[gid] =
+        baseColorTexture.SampleGrad(baseColorSampler, baseColorUV.value, baseColorUV.ddx, baseColorUV.ddy);
 
     var normalUV = fragmentData.uvs[model.normalTexcoordId];
-    var normal = normalTexture.SampleGrad(sampler, normalUV.value, normalUV.ddx, normalUV.ddy).xyz * 2.0 - 1.0;
+    var normal = normalTexture.SampleGrad(normalSampler, normalUV.value, normalUV.ddx, normalUV.ddy).xyz * 2.0 - 1.0;
     normal = normalize(mul(normal, fragmentData.tbn));
     normalOutput[gid] = float4(octahedron::encode(normalize(fragmentData.tbn[2])), octahedron::encode(normal));
 
     var metallicRoughnessUV = fragmentData.uvs[model.metallicRoughnessTexcoordId];
     metallicRoughnessOutput[gid] =
         metallicRoughnessTexture
-            .SampleGrad(sampler, metallicRoughnessUV.value, metallicRoughnessUV.ddx, metallicRoughnessUV.ddy)
+            .SampleGrad(
+                metallicRoughnessSampler, metallicRoughnessUV.value, metallicRoughnessUV.ddx, metallicRoughnessUV.ddy)
             .bg;
 
     var emissiveUV = fragmentData.uvs[model.emissiveTexcoordId];
     emissiveOutput[gid] =
-        float4(emissiveTexture.SampleGrad(sampler, emissiveUV.value, emissiveUV.ddx, emissiveUV.ddy).xyz *
+        float4(emissiveTexture.SampleGrad(emissiveSampler, emissiveUV.value, emissiveUV.ddx, emissiveUV.ddy).xyz *
                    model.emissiveFactor,
                1.0);
 }

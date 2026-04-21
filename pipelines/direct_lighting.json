@@ -11,8 +11,20 @@
       "name": "view_projection_inverse"
     },
     {
+      "type": "float4x4",
+      "name": "shadow_view_projection"
+    },
+    {
       "type": "storageImage",
       "name": "depth_texture_id"
+    },
+    {
+      "type": "storageImage",
+      "name": "shadow_depth_id"
+    },
+    {
+      "type": "sampler",
+      "name": "nearest_sampler"
     },
     {
       "type": "storageImage",

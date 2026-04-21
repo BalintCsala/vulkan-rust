@@ -187,6 +187,21 @@ impl Gltf {
             }
         }
 
+        let default_sampler_ref = resource_manager.add_sampler(unsafe {
+            device
+                .create_sampler(
+                    &vk::SamplerCreateInfo::default()
+                        .mag_filter(vk::Filter::LINEAR)
+                        .min_filter(vk::Filter::LINEAR)
+                        .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                        .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                        .min_lod(0.0)
+                        .max_lod(6.0),
+                    None,
+                )
+                .unwrap()
+        });
+
         let mut sampler_lookup = HashMap::new();
         if let Some(samplers) = &info.samplers {
             samplers
@@ -228,7 +243,7 @@ impl Gltf {
                         _ => panic!("Unhandled wrap_s value: {}", sampler.wrap_t),
                     };
 
-                    let sampler = unsafe {
+                    let sampler_ref = resource_manager.add_sampler(unsafe {
                         device
                             .create_sampler(
                                 &vk::SamplerCreateInfo::default()
@@ -242,8 +257,7 @@ impl Gltf {
                                 None,
                             )
                             .unwrap()
-                    };
-                    let sampler_ref = resource_manager.add_sampler(sampler);
+                    });
                     sampler_lookup.insert(sampler_id, sampler_ref);
                 });
         }
@@ -282,7 +296,7 @@ impl Gltf {
                                     img.decode().expect("Failed to decode image").into_rgba8();
                                 decoded_images.lock().unwrap().push((
                                     texture_id,
-                                    texture.sampler.unwrap_or(0),
+                                    texture.sampler,
                                     img,
                                 ));
                             }
@@ -322,7 +336,15 @@ impl Gltf {
                     );
                     texture_lookup.insert(
                         *texture_id,
-                        (image_ref, *sampler_lookup.get(sampler_id).unwrap_or(&0)),
+                        (
+                            image_ref,
+                            *match sampler_id {
+                                Some(sampler_id) => sampler_lookup
+                                    .get(sampler_id)
+                                    .expect("GLTF file references non-existent sampler with id {sampler_id}"),
+                                None => &default_sampler_ref,
+                            },
+                        ),
                     );
                     (image_ref, img.iter().as_slice())
                 })
