@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use crate::rendering::wrappers::device::Device;
+use vulkan_utils::wrappers::device::Device;
 
 const INITIAL_COMMAND_BUFFER_COUNT: u32 = 8;
 

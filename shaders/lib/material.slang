@@ -1,6 +1,7 @@
 module material;
 
 import math;
+import random;
 
 public struct Material {
     public float3 baseColor;
@@ -35,6 +36,16 @@ public struct Material {
         radiance += diffuse * saturate(NdotL);
 
         return radiance;
+    }
+
+    public float3 sampleCosineWeightedHemisphere(inout Random random)
+    {
+        float2 v = random.uniform2();
+        float angle = 2.0 * PI * v.x;
+        float u = 2.0 * v.y - 1.0;
+
+        float3 directionOffset = float3(sqrt(1.0 - u * u) * float2(cos(angle), sin(angle)), u);
+        return normalize(normal + directionOffset);
     }
 }
 

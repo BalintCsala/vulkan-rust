@@ -1,11 +1,18 @@
 use std::{ops::Deref, sync::Arc};
 
-use ash::vk;
+use ash::{
+    ext::debug_utils,
+    khr::{acceleration_structure, ray_tracing_pipeline},
+    vk,
+};
 
-use crate::rendering::wrappers::instance::Instance;
+use crate::wrappers::instance::Instance;
 
 pub struct Device {
     handle: ash::Device,
+    pub ray_tracing: ray_tracing_pipeline::Device,
+    pub acceleration_structure: acceleration_structure::Device,
+    pub debug_utils: debug_utils::Device,
     _instance: Arc<Instance>,
 }
 
@@ -20,8 +27,14 @@ impl Device {
                 .create_device(*physical_device, create_info, None)
                 .unwrap()
         };
+        let ray_tracing = ray_tracing_pipeline::Device::new(&instance, &handle);
+        let acceleration_structure = acceleration_structure::Device::new(&instance, &handle);
+        let debug_utils = debug_utils::Device::new(&instance, &handle);
         Self {
             handle,
+            ray_tracing,
+            acceleration_structure,
+            debug_utils,
             _instance: instance,
         }
     }

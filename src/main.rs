@@ -21,9 +21,9 @@ use bevy::{
         keyboard::KeyCode,
         mouse::{MouseButton, MouseMotion},
     },
-    math::{Mat4, Quat, Vec3},
+    math::{Quat, Vec3},
     time::Time,
-    transform::components::Transform,
+    transform::{TransformPlugin, components::Transform},
     window::{Window, WindowPlugin, WindowResolution},
     winit::WinitPlugin,
 };
@@ -35,9 +35,10 @@ use crate::{
         renderer_plugin::RendererPlugin,
         resource_manager::ResourceManager,
         vulkan_state::VulkanState,
-        wrappers::device::Device,
     },
 };
+
+use vulkan_utils::wrappers::device::Device;
 
 mod assets;
 mod rendering;
@@ -50,6 +51,7 @@ struct RenderingRes {
     device: Arc<Device>,
     last_frame_time: Instant,
     frame: u32,
+    _scene_files: Vec<Gltf>,
 }
 
 impl Drop for RenderingRes {
@@ -67,6 +69,7 @@ fn main() {
             InputPlugin,
             AccessibilityPlugin,
             WinitPlugin::default(),
+            TransformPlugin,
             WindowPlugin {
                 primary_window: Some(Window {
                     title: "Vulkan Rust".into(),
@@ -106,11 +109,11 @@ fn init_rendering(
     mut resource_manager: ResMut<ResourceManager>,
 ) {
     let scene_list = File::open("./assets/scene.txt").unwrap();
+    let mut scene_files = Vec::new();
     for line in BufReader::new(scene_list).lines().map_while(Result::ok) {
         let gltf = Gltf::from_glb(
             &vulkan_state.device,
             &vulkan_state.allocator,
-            &vulkan_state.debug_utils_device,
             &mut resource_manager,
             &mut File::open(format!("./assets/{line}")).unwrap(),
         )
@@ -119,33 +122,48 @@ fn init_rendering(
         let scenes = gltf.scenes.as_ref().unwrap();
         let scene = &scenes[gltf.scene.unwrap_or(0)];
 
+        let gltf_entity = commands.spawn(Transform::IDENTITY).id();
+
         let mut remaining_nodes: VecDeque<_> = scene
             .nodes
             .iter()
-            .map(|node_id| (node_id, Mat4::IDENTITY))
+            .map(|node_id| (node_id, gltf_entity))
             .collect();
-        while let Some((node_id, parent_transform)) = remaining_nodes.pop_front() {
+
+        while let Some((node_id, parent)) = remaining_nodes.pop_front() {
             let node = &gltf.nodes[*node_id];
-            let transform = parent_transform * node.model_matrix();
-            if let Some(children) = &node.children {
-                remaining_nodes.extend(children.iter().map(|node_id| (node_id, transform)));
+            let mesh_entity = commands
+                .spawn(Transform::from_matrix(node.model_matrix()))
+                .id();
+
+            commands.entity(parent).add_children(&[mesh_entity]);
+
+            if let Some(mesh_id) = node.mesh {
+                let mut children = Vec::new();
+                for primitive_id in &gltf.meshes[mesh_id].primitives {
+                    let primitive = &gltf.primitives[*primitive_id];
+                    children.push(
+                        commands
+                            .spawn((Transform::IDENTITY, primitive.clone()))
+                            .id(),
+                    );
+                }
+                commands.entity(mesh_entity).add_children(&children);
             }
-            let mesh_id = match node.mesh {
-                Some(mesh) => mesh,
-                None => continue,
-            };
-            // TODO: Add a parent entity for the node
-            for primitive_id in &gltf.meshes[mesh_id].primitives {
-                let primitive = &gltf.primitives[*primitive_id];
-                commands.spawn((Transform::from_matrix(transform), primitive.clone()));
+
+            if let Some(children) = &node.children {
+                remaining_nodes.extend(children.iter().map(|node_id| (node_id, mesh_entity)));
             }
         }
+
+        scene_files.push(gltf);
     }
 
     commands.insert_resource(RenderingRes {
         device: vulkan_state.device.clone(),
         last_frame_time: Instant::now(),
         frame: 0,
+        _scene_files: scene_files,
     });
 }
 

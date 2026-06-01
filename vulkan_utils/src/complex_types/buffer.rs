@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use ash::{ext::debug_utils, vk};
+use ash::vk;
 use vk_mem::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, MemoryUsage};
 
-use crate::rendering::{
-    vulkan_utils::assign_debug_name,
+use crate::{
+    utility_functions::assign_debug_name,
     wrappers::{allocator::Allocator, device::Device},
 };
 
@@ -20,7 +20,6 @@ impl Buffer {
     pub fn new(
         device: &Arc<Device>,
         allocator: Arc<Allocator>,
-        debug_utils_device: &debug_utils::Device,
         usage: vk::BufferUsageFlags,
         size: u64,
         name: &str,
@@ -43,7 +42,7 @@ impl Buffer {
                 .unwrap()
         };
 
-        assign_debug_name(debug_utils_device, buffer, name);
+        assign_debug_name(device, buffer, name);
 
         let address = unsafe {
             device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))

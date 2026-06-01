@@ -1,6 +1,8 @@
-use std::ffi::CString;
+use std::{ffi::CString, sync::Arc};
 
-use ash::{ext::debug_utils, vk};
+use ash::vk;
+
+use crate::wrappers::device::Device;
 
 pub fn full_subresource_range(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
@@ -47,13 +49,10 @@ pub fn image_type_to_view_type(image_type: vk::ImageType) -> vk::ImageViewType {
     }
 }
 
-pub fn assign_debug_name<T: vk::Handle>(
-    debug_utils_device: &debug_utils::Device,
-    handle: T,
-    name: &str,
-) {
+pub fn assign_debug_name<T: vk::Handle>(device: &Arc<Device>, handle: T, name: &str) {
     unsafe {
-        debug_utils_device
+        device
+            .debug_utils
             .set_debug_utils_object_name(
                 &vk::DebugUtilsObjectNameInfoEXT::default()
                     .object_handle(handle)

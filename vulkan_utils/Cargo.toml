@@ -1,10 +1,11 @@
 [package]
-name = "pipeline_generator"
+name = "vulkan_utils"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 ash = {version = "0.38.0", features = ["linked"]}
+vk-mem = "0.5.0"
 prettyplease = "0.2.37"
 proc-macro2 = "1.0.106"
 quote = "1.0.45"

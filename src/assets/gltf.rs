@@ -8,7 +8,7 @@ use std::{
     thread,
 };
 
-use ash::{ext::debug_utils, vk};
+use ash::vk;
 use bevy::{
     math::{Mat4, Quat, Vec3},
     platform::collections::HashSet,
@@ -17,11 +17,12 @@ use image::{ImageError, ImageFormat, ImageReader};
 
 use crate::{
     assets::model::{Model, ModelData},
-    rendering::{
-        buffer::Buffer,
-        resource_manager::{ImageReference, ImageSize, ResourceManager, SamplerReference},
-        wrappers::{allocator::Allocator, device::Device},
-    },
+    rendering::resource_manager::{ImageReference, ImageSize, ResourceManager, SamplerReference},
+};
+
+use vulkan_utils::{
+    complex_types::buffer::Buffer,
+    wrappers::{allocator::Allocator, device::Device},
 };
 
 #[derive(Debug)]
@@ -103,7 +104,6 @@ impl Gltf {
     pub fn from_glb<R: Read + Seek>(
         device: &Arc<Device>,
         allocator: &Arc<Allocator>,
-        debug_utils_device: &debug_utils::Device,
         resource_manager: &mut ResourceManager,
         reader: &mut R,
     ) -> Result<Self, Error> {
@@ -365,7 +365,6 @@ impl Gltf {
                     primitives.push(Self::load_primitive(
                         device,
                         allocator,
-                        debug_utils_device,
                         resource_manager,
                         &texture_lookup,
                         &info,
@@ -399,7 +398,6 @@ impl Gltf {
     fn load_primitive(
         device: &Arc<Device>,
         allocator: &Arc<Allocator>,
-        debug_utils_device: &debug_utils::Device,
         resource_manager: &mut ResourceManager,
         texture_lookup: &HashMap<usize, (ImageReference, SamplerReference)>,
         info: &types::Info,
@@ -426,8 +424,8 @@ impl Gltf {
             let mut buffer = Buffer::new(
                 device,
                 allocator.clone(),
-                debug_utils_device,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                 data.len() as u64,
                 &format!("{mesh_name} {name}"),
             );
@@ -473,8 +471,8 @@ impl Gltf {
                 let mut indices = Buffer::new(
                     device,
                     allocator.clone(),
-                    debug_utils_device,
-                    vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER,
+                    vk::BufferUsageFlags::INDEX_BUFFER
+                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                     data.len() as u64,
                     &indices_name,
                 );
@@ -486,8 +484,8 @@ impl Gltf {
                 let mut indices = Buffer::new(
                     device,
                     allocator.clone(),
-                    debug_utils_device,
-                    vk::BufferUsageFlags::INDEX_BUFFER,
+                    vk::BufferUsageFlags::INDEX_BUFFER
+                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                     positions_count as u64,
                     &indices_name,
                 );
@@ -616,7 +614,9 @@ impl Gltf {
             },
             indices,
             index_count as u32,
+            positions_count as u32,
         );
+
         Ok(Model { model_ref })
     }
 

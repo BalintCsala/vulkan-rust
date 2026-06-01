@@ -2,41 +2,35 @@ use std::sync::Arc;
 
 use ash::{
     ext::debug_utils,
-    khr::{surface, swapchain},
+    khr::{
+        acceleration_structure, deferred_host_operations, ray_tracing_pipeline, surface, swapchain,
+    },
     vk,
 };
 use bevy::ecs::resource::Resource;
 use vk_mem::{AllocatorCreateFlags, AllocatorCreateInfo};
 use winit::raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
-use crate::rendering::{
-    command_cache::CommandCache,
-    image::Image,
-    vulkan_utils::assign_debug_name,
+use crate::rendering::command_cache::CommandCache;
+
+use vulkan_utils::{
+    complex_types::image::Image,
+    utility_functions::assign_debug_name,
     wrappers::{allocator::Allocator, device::Device, instance::Instance},
 };
 
 const FRAMES_IN_FLIGHT: usize = 3;
-
-pub enum Deletable {
-    Droppable(Box<dyn Send + Sync>),
-    Callback(Box<dyn FnOnce(&Arc<Device>) + Send + Sync>),
-}
 
 struct FrameData {
     device: Arc<Device>,
     fence: vk::Fence,
     command_cache: CommandCache,
     image_acquired: vk::Semaphore,
-    deletion_queue: Vec<Deletable>,
+    deletion_queue: Vec<Box<dyn Send + Sync>>,
 }
 
 impl FrameData {
-    pub fn new(
-        device: Arc<Device>,
-        debug_utils_device: &debug_utils::Device,
-        frame_id: usize,
-    ) -> Self {
+    pub fn new(device: Arc<Device>, frame_id: usize) -> Self {
         let fence = unsafe {
             device
                 .create_fence(
@@ -45,11 +39,7 @@ impl FrameData {
                 )
                 .unwrap()
         };
-        assign_debug_name(
-            debug_utils_device,
-            fence,
-            &format!("Frame fence #{}", frame_id),
-        );
+        assign_debug_name(&device, fence, &format!("Frame fence #{}", frame_id));
 
         let image_acquired = unsafe {
             device
@@ -57,7 +47,7 @@ impl FrameData {
                 .unwrap()
         };
         assign_debug_name(
-            debug_utils_device,
+            &device,
             image_acquired,
             &format!("Image acquired semaphore #{}", frame_id),
         );
@@ -93,8 +83,8 @@ struct SwapchainImageData {
 #[derive(Resource)]
 pub struct VulkanState {
     _entry: ash::Entry,
-    _instance: Arc<Instance>,
-    _physical_device: vk::PhysicalDevice,
+    pub instance: Arc<Instance>,
+    pub physical_device: vk::PhysicalDevice,
     pub device: Arc<Device>,
     pub queue: vk::Queue,
 
@@ -114,8 +104,6 @@ pub struct VulkanState {
     frame_id: usize,
 
     pub allocator: Arc<Allocator>,
-
-    pub debug_utils_device: debug_utils::Device,
 }
 
 impl VulkanState {
@@ -177,19 +165,6 @@ impl VulkanState {
 
         let present_mode = vk::PresentModeKHR::FIFO;
 
-        // let present_mode = unsafe {
-        //     *surface_instance
-        //         .get_physical_device_surface_present_modes(physical_device, surface)
-        //         .unwrap()
-        //         .iter()
-        //         .min_by_key(|&present_mode| match *present_mode {
-        //             vk::PresentModeKHR::MAILBOX => 0,
-        //             vk::PresentModeKHR::FIFO => 1,
-        //             _ => u32::MAX,
-        //         })
-        //         .unwrap_or(&vk::PresentModeKHR::FIFO)
-        // };
-
         let surface_capabilities = unsafe {
             surface_instance
                 .get_physical_device_surface_capabilities(physical_device, surface)
@@ -204,7 +179,12 @@ impl VulkanState {
                 .queue_create_infos(&[vk::DeviceQueueCreateInfo::default()
                     .queue_family_index(0)
                     .queue_priorities(&[1.0])])
-                .enabled_extension_names(&[swapchain::NAME.as_ptr()])
+                .enabled_extension_names(&[
+                    swapchain::NAME.as_ptr(),
+                    acceleration_structure::NAME.as_ptr(),
+                    ray_tracing_pipeline::NAME.as_ptr(),
+                    deferred_host_operations::NAME.as_ptr(),
+                ])
                 .push_next(
                     &mut vk::PhysicalDeviceFeatures2::default().features(
                         vk::PhysicalDeviceFeatures::default()
@@ -233,6 +213,14 @@ impl VulkanState {
                     &mut vk::PhysicalDeviceVulkan13Features::default()
                         .synchronization2(true)
                         .dynamic_rendering(true),
+                )
+                .push_next(
+                    &mut vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+                        .acceleration_structure(true),
+                )
+                .push_next(
+                    &mut vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default()
+                        .ray_tracing_pipeline(true),
                 ),
         ));
 
@@ -244,8 +232,6 @@ impl VulkanState {
             )
         };
 
-        let debug_utils_device = debug_utils::Device::new(&instance, &device);
-
         let allocator = {
             let mut create_info = AllocatorCreateInfo::new(&instance, &device, physical_device);
             create_info.flags = AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
@@ -256,21 +242,21 @@ impl VulkanState {
         let swapchain_device = swapchain::Device::new(&instance, &device);
 
         let frames = (0..FRAMES_IN_FLIGHT)
-            .map(|frame_id| FrameData::new(device.clone(), &debug_utils_device, frame_id))
+            .map(|frame_id| FrameData::new(device.clone(), frame_id))
             .collect();
 
         let extent = vk::Extent2D::default().width(width).height(height);
 
         Self {
             _entry: entry,
-            _instance: instance,
+            instance,
+            physical_device,
+            device,
+
             surface_instance,
             surface,
             extent,
-            _physical_device: physical_device,
-            device,
             queue,
-            debug_utils_device,
             allocator,
             swapchain: None,
             swapchain_device,
@@ -301,7 +287,7 @@ impl VulkanState {
                         .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                         .unwrap();
                     assign_debug_name(
-                        &self.debug_utils_device,
+                        &self.device,
                         semaphore,
                         &format!("Rendering finished semaphore #{}", id),
                     );
@@ -355,7 +341,7 @@ impl VulkanState {
         };
         self.images.iter().enumerate().for_each(|(i, image_data)| {
             assign_debug_name(
-                &self.debug_utils_device,
+                &self.device,
                 image_data.image.handle,
                 &format!("Swapchain image #{}", i),
             );
@@ -370,19 +356,8 @@ impl VulkanState {
         }
     }
 
-    pub fn queue_object_for_deletion<T: Drop + Send + Sync + 'static>(&mut self, obj: T) {
-        self.frames[self.frame_id]
-            .deletion_queue
-            .push(Deletable::Droppable(Box::new(obj)));
-    }
-
-    pub fn queue_callback_for_deletion<T: FnMut(&Arc<Device>) + Send + Sync + 'static>(
-        &mut self,
-        callback: T,
-    ) {
-        self.frames[self.frame_id]
-            .deletion_queue
-            .push(Deletable::Callback(Box::new(callback)));
+    pub fn queue_object_for_deletion(&mut self, obj: Box<dyn Send + Sync>) {
+        self.frames[self.frame_id].deletion_queue.push(obj);
     }
 
     pub fn current_image(&mut self) -> &mut Image {
@@ -475,12 +450,7 @@ impl VulkanState {
         self.frame_id = (self.frame_id + 1) % FRAMES_IN_FLIGHT;
         self.image_id = None;
 
-        for deletable in self.frames[self.frame_id].deletion_queue.drain(..) {
-            match deletable {
-                Deletable::Droppable(_) => {}
-                Deletable::Callback(callback) => callback(&self.device),
-            }
-        }
+        self.frames[self.frame_id].deletion_queue.clear();
     }
 }
 

@@ -1,0 +1,51 @@
+{
+  "structName": "RaytracingPipeline",
+  "shaderPath": "shaders/raytrace.slang",
+  "shaderInfo": {
+    "type": "raytracing",
+    "materials": [
+      {
+        "name": "gltf",
+        "shaderPath": "shaders/gltf_raytracing_material.slang",
+        "closestHit": "chit",
+        "anyHit": "ahit"
+      }
+    ],
+    "raygen": "rgen",
+    "miss": "miss"
+  },
+  "inputs": [
+    {
+      "type": "accelerationStructure",
+      "name": "acceleration_structure"
+    },
+    {
+      "type": "buffer",
+      "name": "model_data"
+    },
+    {
+      "type": "buffer",
+      "name": "instance_data"
+    },
+    {
+      "type": "float4x4",
+      "name": "view_projection_inv"
+    },
+    {
+      "type": "float3",
+      "name": "camera_position"
+    },
+    {
+      "type": "float2",
+      "name": "resolution"
+    },
+    {
+      "type": "storageImage",
+      "name": "output"
+    },
+    {
+      "type": "uint",
+      "name": "frame"
+    }
+  ]
+}

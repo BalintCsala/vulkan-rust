@@ -2,7 +2,7 @@ use std::{ops::Deref, sync::Arc};
 
 use vk_mem::AllocatorCreateInfo;
 
-use crate::rendering::wrappers::device::Device;
+use crate::wrappers::device::Device;
 
 pub struct Allocator {
     handle: vk_mem::Allocator,

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use ash::{ext::debug_utils, vk};
+use ash::vk;
 use vk_mem::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, MemoryUsage};
 
-use crate::rendering::{
-    vulkan_utils::{
+use crate::{
+    utility_functions::{
         assign_debug_name, format_to_aspect, full_subresource_range, image_type_to_view_type,
         mip_level_subresource_range,
     },
@@ -26,7 +26,6 @@ impl Image {
     pub fn new(
         device: Arc<Device>,
         allocator: Arc<Allocator>,
-        debug_utils_device: &debug_utils::Device,
         extent: vk::Extent3D,
         format: vk::Format,
         usage: vk::ImageUsageFlags,
@@ -58,7 +57,7 @@ impl Image {
                 .unwrap()
         };
 
-        assign_debug_name(debug_utils_device, image, name);
+        assign_debug_name(&device, image, name);
 
         let view = unsafe {
             device
@@ -73,7 +72,7 @@ impl Image {
                 )
                 .unwrap()
         };
-        assign_debug_name(debug_utils_device, view, &format!("{name} main view"));
+        assign_debug_name(&device, view, &format!("{name} main view"));
 
         let mip_views = (1..mip_levels)
             .map(|level| unsafe {
@@ -92,11 +91,7 @@ impl Image {
                         None,
                     )
                     .unwrap();
-                assign_debug_name(
-                    debug_utils_device,
-                    view,
-                    &format!("{name} mip #{level} view"),
-                );
+                assign_debug_name(&device, view, &format!("{name} mip #{level} view"));
                 view
             })
             .collect();
