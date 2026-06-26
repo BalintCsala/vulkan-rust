@@ -2,16 +2,17 @@ module material;
 
 import math;
 import random;
+import packing;
 
 public struct Material {
     public float3 baseColor;
     public float metallic;
     public float roughness;
     public float3 normal;
-    public float3 f0;
     public float3 emissive;
 
     float3 fresnel(float cosTheta) {
+        float3 f0 = lerp(0.04, baseColor, metallic);
         return f0 + (1.0 - f0) * pow(1.0 - cosTheta, 5.0);
     }
 
@@ -24,14 +25,15 @@ public struct Material {
         float NdotL = dot(normal, light);
         float NdotV = dot(normal, view);
 
-        // Diffuse (Hammon)
-        float facing = dot(view, light) * 0.5 + 0.5;
-        float rough = facing * (0.9 - 0.4 * facing) * (0.5 + NdotH) / NdotH;
-        float smooth = 1.05 * (1.0 - pow(1.0 - NdotL, 5.0)) * (1.0 - pow(1.0 - NdotV, 5.0));
-        float single = 1.0 / PI * lerp(smooth, rough, roughness);
-        float multi = 0.1159 * roughness;
-
-        float3 diffuse = baseColor * (single + baseColor * multi) * (1.0 - metallic);
+        // // Diffuse (Hammon)
+        // float facing = dot(view, light) * 0.5 + 0.5;
+        // float rough = facing * (0.9 - 0.4 * facing) * (0.5 + NdotH) / NdotH;
+        // float smooth = 1.05 * (1.0 - pow(1.0 - NdotL, 5.0)) * (1.0 - pow(1.0 - NdotV, 5.0));
+        // float single = 1.0 / PI * lerp(smooth, rough, roughness);
+        // float multi = 0.1159 * roughness;
+        //
+        // float3 diffuse = baseColor * (single + baseColor * multi) * (1.0 - metallic);
+        float3 diffuse = baseColor;
 
         radiance += diffuse * saturate(NdotL);
 
@@ -47,7 +49,51 @@ public struct Material {
         float3 directionOffset = float3(sqrt(1.0 - u * u) * float2(cos(angle), sin(angle)), u);
         return normalize(normal + directionOffset);
     }
+
+    public PackedMaterial pack() {
+        PackedMaterial packed;
+
+        packed.baseColor = packUnorm4x8(float4(pow(baseColor, 1.0 / 2.2), 1.0));
+        packed.metallicRoughness = packUnorm4x8(float4(metallic, roughness, 0.0, 0.0));
+        packed.normal = packUnorm2x16(octahedron::encode(normal));
+        packed.emissive = packHDR(emissive);
+
+        return packed;
+    }
 }
+
+public struct PackedMaterial {
+    uint baseColor;
+    uint metallicRoughness;
+    uint normal;
+    uint emissive;
+
+    public Material unpack() {
+        Material material;
+
+        material.baseColor = pow(unpackUnorm4x8ToFloat(baseColor).rgb, 2.2);
+        float2 metallicRoughness = unpackUnorm4x8ToFloat(metallicRoughness).xy;
+        material.metallic = metallicRoughness.x;
+        material.roughness = metallicRoughness.y;
+        material.normal = octahedron::decode(unpackUnorm2x16ToFloat(normal));
+        material.emissive = unpackHDR(emissive);
+
+        return material;
+    }
+
+    public static PackedMaterial fromRaw(uint4 raw) {
+        PackedMaterial result;
+        result.baseColor = raw.x;
+        result.metallicRoughness = raw.y;
+        result.normal = raw.z;
+        result.emissive = raw.w;
+        return result;
+    }
+
+    public uint4 toRaw() {
+        return uint4(baseColor, metallicRoughness, normal, emissive);
+    }
+};
 
 
 

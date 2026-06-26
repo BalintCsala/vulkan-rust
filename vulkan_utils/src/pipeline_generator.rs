@@ -15,6 +15,8 @@ fn compile_shader(path: &str) -> Vec<u32> {
         .arg(path)
         .arg("-fvk-use-c-layout")
         .arg("-fvk-use-entrypoint-name")
+        .arg("-I")
+        .arg("shaders/")
         .arg("-o")
         .arg(&out_path)
         .spawn()

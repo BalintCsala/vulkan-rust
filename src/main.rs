@@ -90,7 +90,7 @@ fn main() {
 fn setup_scene(mut commands: Commands) {
     commands.spawn((
         Transform {
-            translation: Vec3::new(0.0, 0.0, 3.0),
+            translation: Vec3::new(0.0, 5.0, 3.0),
             rotation: Quat::IDENTITY,
             ..Default::default()
         },

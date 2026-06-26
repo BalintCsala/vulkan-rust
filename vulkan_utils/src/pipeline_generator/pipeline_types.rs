@@ -1,16 +1,26 @@
-use std::{ffi::CString, fs::File, sync::Arc};
+use std::{ffi::CString, fs::File, path::Path, sync::Arc};
 
 use ash::vk;
 
 use crate::{
     complex_types::buffer::Buffer,
     pipeline_generator::{create_shader_module, types::PipelineDefinition},
+    utility_functions::assign_debug_name,
     wrappers::{allocator::Allocator, device::Device, instance::Instance},
 };
 
 fn parse_definition(path: &str) -> PipelineDefinition {
     let file = File::open(path).unwrap();
     serde_json::from_reader(file).unwrap()
+}
+
+fn get_short_pipeline_name(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned()
 }
 
 pub trait Pipeline {
@@ -137,6 +147,12 @@ impl GraphicsPipeline {
                 .unwrap()[0]
         };
 
+        assign_debug_name(
+            &self.device,
+            self.pipeline,
+            &get_short_pipeline_name(&self.definition_path),
+        );
+
         unsafe {
             self.device.destroy_shader_module(module, None);
         };
@@ -242,6 +258,12 @@ impl ComputePipeline {
                 )
                 .unwrap()[0]
         };
+
+        assign_debug_name(
+            &self.device,
+            self.pipeline,
+            &get_short_pipeline_name(&self.definition_path),
+        );
 
         unsafe {
             self.device.destroy_shader_module(module, None);
@@ -445,6 +467,12 @@ impl RaytracingPipeline {
                 )
                 .unwrap()[0]
         };
+
+        assign_debug_name(
+            &self.device,
+            self.pipeline,
+            &get_short_pipeline_name(&self.definition_path),
+        );
 
         let mut rt_properties = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
         let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut rt_properties);

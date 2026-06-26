@@ -181,6 +181,14 @@ impl OcclusionTexture {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub(super) enum AlphaMode {
+    Opaque,
+    Mask,
+    Blend,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Material {
     pub(super) pbr_metallic_roughness: Option<PbrMetallicRoughness>,
@@ -193,7 +201,7 @@ pub(super) struct Material {
     )]
     pub(super) emissive_factor: [f32; 3],
     #[serde(default = "Material::default_alpha_mode")]
-    pub(super) alpha_mode: String,
+    pub(super) alpha_mode: AlphaMode,
     #[serde(default = "Material::default_alpha_cutoff")]
     pub(super) alpha_cutoff: f32,
     #[serde(default = "Material::default_double_sided")]
@@ -206,8 +214,8 @@ impl Material {
         [0.0, 0.0, 0.0]
     }
 
-    fn default_alpha_mode() -> String {
-        "OPAQUE".to_owned()
+    fn default_alpha_mode() -> AlphaMode {
+        AlphaMode::Opaque
     }
 
     fn default_alpha_cutoff() -> f32 {

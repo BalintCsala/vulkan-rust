@@ -163,7 +163,7 @@ impl VulkanState {
                 .unwrap_or(&surface_formats[0])
         };
 
-        let present_mode = vk::PresentModeKHR::FIFO;
+        let present_mode = vk::PresentModeKHR::MAILBOX;
 
         let surface_capabilities = unsafe {
             surface_instance

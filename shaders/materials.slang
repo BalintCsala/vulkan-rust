@@ -1,7 +1,7 @@
 import lib.bindless;
 import lib.forward;
 import lib.barycentrics;
-import lib.encoding;
+import lib.packing;
 
 struct PushConstants {
     float4x4 viewProjection;
@@ -57,13 +57,9 @@ void cs(uint2 gid: SV_DispatchThreadID) {
 
     var baseColorTexture = getSampledImage<Texture2D<float4>>(model.baseColorTextureId);
     var normalTexture = getSampledImage<Texture2D<float4>>(model.normalTextureId);
-    var metallicRoughnessTexture = getSampledImage<Texture2D<float4>>(model.metallicRoughnessTextureId);
-    var emissiveTexture = getSampledImage<Texture2D<float4>>(model.emissiveTextureId);
 
     var baseColorSampler = getSampler<SamplerState>(model.baseColorSamplerId);
     var normalSampler = getSampler<SamplerState>(model.normalSamplerId);
-    var metallicRoughnessSampler = getSampler<SamplerState>(model.metallicRoughnessSamplerId);
-    var emissiveSampler = getSampler<SamplerState>(model.emissiveSamplerId);
 
     var fragmentData = model.getFragmentData(index0, index1, index2, position0, position1, position2, barycentrics);
     fragmentData.tbn = mul(instance.normalMatrix, fragmentData.tbn);
@@ -77,18 +73,31 @@ void cs(uint2 gid: SV_DispatchThreadID) {
     normal = normalize(mul(normal, fragmentData.tbn));
     normalOutput[gid] = float4(octahedron::encode(normalize(fragmentData.tbn[2])), octahedron::encode(normal));
 
-    var metallicRoughnessUV = fragmentData.uvs[model.metallicRoughnessTexcoordId];
-    metallicRoughnessOutput[gid] =
-        metallicRoughnessTexture
-            .SampleGrad(
-                metallicRoughnessSampler, metallicRoughnessUV.value, metallicRoughnessUV.ddx, metallicRoughnessUV.ddy)
-            .bg;
+    if (model.metallicRoughnessTextureId >= 0) {
+        var metallicRoughnessTexture = getSampledImage<Texture2D<float4>>(model.metallicRoughnessTextureId);
+        var metallicRoughnessSampler = getSampler<SamplerState>(model.metallicRoughnessSamplerId);
+        var metallicRoughnessUV = fragmentData.uvs[model.metallicRoughnessTexcoordId];
+        metallicRoughnessOutput[gid] =
+            metallicRoughnessTexture
+                .SampleGrad(
+                    metallicRoughnessSampler, metallicRoughnessUV.value, metallicRoughnessUV.ddx, metallicRoughnessUV.ddy)
+                .bg;
+    } else {
+        metallicRoughnessOutput[gid] = float2(1.0, 1.0);
+    }
 
-    var emissiveUV = fragmentData.uvs[model.emissiveTexcoordId];
-    emissiveOutput[gid] =
-        float4(emissiveTexture.SampleGrad(emissiveSampler, emissiveUV.value, emissiveUV.ddx, emissiveUV.ddy).xyz *
-                   model.emissiveFactor,
-               1.0);
+    if (model.emissiveTextureId >= 0) {
+        var emissiveUV = fragmentData.uvs[model.emissiveTexcoordId];
+        var emissiveTexture = getSampledImage<Texture2D<float4>>(model.emissiveTextureId);
+        var emissiveSampler = getSampler<SamplerState>(model.emissiveSamplerId);
+
+        emissiveOutput[gid] =
+            float4(emissiveTexture.SampleGrad(emissiveSampler, emissiveUV.value, emissiveUV.ddx, emissiveUV.ddy).xyz *
+                       model.emissiveFactor,
+                   1.0);
+    } else {
+        emissiveOutput[gid] = float4(model.emissiveFactor, 1.0);
+    }
 }
 
 

@@ -7,7 +7,7 @@ use bevy::{
 };
 
 use crate::{
-    assets::model::ModelData,
+    assets::model::{ModelData, ModelRenderInfo},
     rendering::{
         command_cache::CommandCache,
         generated_pipelines::{MipmapPipelinePushConstants, create_mipmap_pipeline},
@@ -17,7 +17,7 @@ use vulkan_utils::{
     complex_types::{buffer::Buffer, image::Image},
     pipeline_generator::pipeline_types::{ComputePipeline, Pipeline},
     utility_functions::{format_to_aspect, mip_level_subresource_range},
-    wrappers::{allocator::Allocator, device::Device},
+    wrappers::{allocator::Allocator, device::Device, fence::Fence, sampler::Sampler},
 };
 
 const SAMPLED_IMAGE_BINDING: u32 = 0;
@@ -116,6 +116,7 @@ struct PendingBlasBuild {
     position_count: u32,
     index_count: u32,
     reference: ModelReference,
+    render_info: ModelRenderInfo,
 }
 
 struct RTInstance {
@@ -141,7 +142,7 @@ pub struct ResourceManager {
     images: HashMap<ImageReference, ImageInfo>,
     images_by_name: HashMap<String, ImageReference>,
     next_image_reference: ImageReference,
-    samplers: Vec<vk::Sampler>,
+    samplers: Vec<Sampler>,
 
     // TODO: Better suballocation strategy
     pub model_buffer: Buffer,
@@ -151,6 +152,7 @@ pub struct ResourceManager {
     pending_blas_builds: Vec<PendingBlasBuild>,
     pub tlas: vk::AccelerationStructureKHR,
     acceleration_structure_buffers: Vec<Buffer>,
+    acceleration_structure_build_fence: Fence,
 
     pub instance_buffer: Buffer,
     rt_instances: Vec<RTInstance>,
@@ -159,7 +161,7 @@ pub struct ResourceManager {
 
     staging_buffer: Buffer,
     staging_buffer_offset: usize,
-    staging_fences: Vec<vk::Fence>,
+    staging_fences: Vec<Fence>,
 
     mipmap_pipeline: ComputePipeline,
 }
@@ -290,6 +292,9 @@ impl ResourceManager {
             "RT Instance Buffer",
         );
 
+        let acceleration_structure_build_fence =
+            Fence::new(device.clone(), &vk::FenceCreateInfo::default());
+
         Self {
             device,
             allocator,
@@ -313,6 +318,7 @@ impl ResourceManager {
             tlas: vk::AccelerationStructureKHR::null(),
             rt_instances: Vec::new(),
             rt_instance_buffer,
+            acceleration_structure_build_fence,
 
             command_cache,
             staging_buffer,
@@ -490,16 +496,12 @@ impl ResourceManager {
         command_buffer: vk::CommandBuffer,
         barriers: &[vk::ImageMemoryBarrier2],
     ) {
+        let fence = Fence::new(self.device.clone(), &vk::FenceCreateInfo::default());
         unsafe {
             self.device.cmd_pipeline_barrier2(
                 command_buffer,
                 &vk::DependencyInfo::default().image_memory_barriers(barriers),
             );
-        };
-        let fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .unwrap()
         };
         unsafe {
             self.device.end_command_buffer(command_buffer).unwrap();
@@ -509,7 +511,7 @@ impl ResourceManager {
                 .queue_submit(
                     self.queue,
                     &[vk::SubmitInfo::default().command_buffers(&[command_buffer])],
-                    fence,
+                    *fence,
                 )
                 .unwrap();
         };
@@ -519,14 +521,18 @@ impl ResourceManager {
     pub fn flush_staging(&mut self) {
         unsafe {
             self.device
-                .wait_for_fences(&self.staging_fences, true, u64::MAX)
+                .wait_for_fences(
+                    &self
+                        .staging_fences
+                        .iter()
+                        .map(|fence| **fence)
+                        .collect::<Vec<_>>(),
+                    true,
+                    u64::MAX,
+                )
                 .unwrap();
         };
-        self.staging_fences.drain(..).for_each(|fence| {
-            unsafe {
-                self.device.destroy_fence(fence, None);
-            };
-        });
+        self.staging_fences.clear();
 
         self.staging_buffer_offset = 0;
     }
@@ -800,6 +806,7 @@ impl ResourceManager {
         index_buffer: Buffer,
         index_count: u32,
         position_count: u32,
+        render_info: ModelRenderInfo,
     ) -> ModelReference {
         let reference = self.next_model_ref;
         self.next_model_ref += 1;
@@ -810,6 +817,7 @@ impl ResourceManager {
             position_count,
             index_count,
             reference,
+            render_info,
         });
 
         self.model_buffer
@@ -851,6 +859,11 @@ impl ResourceManager {
                                 device_address: build_data.index_device_address,
                             })
                             .index_type(vk::IndexType::UINT32),
+                    })
+                    .flags(if build_data.render_info.opaque {
+                        vk::GeometryFlagsKHR::OPAQUE
+                    } else {
+                        vk::GeometryFlagsKHR::empty()
                     })]
             })
             .collect();
@@ -1034,12 +1047,6 @@ impl ResourceManager {
             .primitive_offset(0)
             .primitive_count(self.rt_instances.len() as u32)];
 
-        let fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .unwrap()
-        };
-
         let command_buffer = self.command_cache.get_command_buffer();
         unsafe {
             device
@@ -1077,14 +1084,14 @@ impl ResourceManager {
                 .queue_submit(
                     self.queue,
                     &[vk::SubmitInfo::default().command_buffers(&[command_buffer])],
-                    fence,
+                    *self.acceleration_structure_build_fence,
                 )
                 .unwrap();
         };
 
         unsafe {
             self.device
-                .wait_for_fences(&[fence], true, u64::MAX)
+                .wait_for_fences(&[*self.acceleration_structure_build_fence], true, u64::MAX)
                 .unwrap();
         };
         self.pending_blas_builds.clear();
@@ -1224,7 +1231,7 @@ impl ResourceManager {
         };
     }
 
-    pub fn add_sampler(&mut self, sampler: vk::Sampler) -> SamplerReference {
+    pub fn add_sampler(&mut self, sampler: Sampler) -> SamplerReference {
         let reference = self.samplers.len() as SamplerReference;
 
         unsafe {
@@ -1234,7 +1241,7 @@ impl ResourceManager {
                     .descriptor_type(vk::DescriptorType::SAMPLER)
                     .dst_binding(SAMPLER_BINDING)
                     .dst_array_element(reference as u32)
-                    .image_info(&[vk::DescriptorImageInfo::default().sampler(sampler)])
+                    .image_info(&[vk::DescriptorImageInfo::default().sampler(*sampler)])
                     .dst_set(self.descriptor_set)],
                 &[],
             );
@@ -1265,6 +1272,12 @@ impl Drop for ResourceManager {
     fn drop(&mut self) {
         println!("Dropped resource manager");
         unsafe {
+            self.device.device_wait_idle().unwrap();
+        };
+
+        self.staging_fences.clear();
+
+        unsafe {
             self.device
                 .destroy_pipeline_layout(self.bindless_pipeline_layout, None);
         };
@@ -1277,6 +1290,23 @@ impl Drop for ResourceManager {
                 .destroy_descriptor_pool(self.descriptor_pool, None);
         };
 
+        self.samplers.clear();
         self.images.clear();
+
+        self.acceleration_structure_buffers.clear();
+
+        self.model_blases
+            .drain(..)
+            .for_each(|acceleration_structure| unsafe {
+                self.device
+                    .acceleration_structure
+                    .destroy_acceleration_structure(acceleration_structure, None);
+            });
+
+        unsafe {
+            self.device
+                .acceleration_structure
+                .destroy_acceleration_structure(self.tlas, None);
+        };
     }
 }

@@ -16,13 +16,16 @@ use bevy::{
 use image::{ImageError, ImageFormat, ImageReader};
 
 use crate::{
-    assets::model::{Model, ModelData},
+    assets::{
+        gltf::types::AlphaMode,
+        model::{Model, ModelData, ModelRenderInfo},
+    },
     rendering::resource_manager::{ImageReference, ImageSize, ResourceManager, SamplerReference},
 };
 
 use vulkan_utils::{
     complex_types::buffer::Buffer,
-    wrappers::{allocator::Allocator, device::Device},
+    wrappers::{allocator::Allocator, device::Device, sampler::Sampler},
 };
 
 #[derive(Debug)]
@@ -187,20 +190,16 @@ impl Gltf {
             }
         }
 
-        let default_sampler_ref = resource_manager.add_sampler(unsafe {
-            device
-                .create_sampler(
-                    &vk::SamplerCreateInfo::default()
-                        .mag_filter(vk::Filter::LINEAR)
-                        .min_filter(vk::Filter::LINEAR)
-                        .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                        .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                        .min_lod(0.0)
-                        .max_lod(6.0),
-                    None,
-                )
-                .unwrap()
-        });
+        let default_sampler_ref = resource_manager.add_sampler(Sampler::new(
+            device.clone(),
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                .min_lod(0.0)
+                .max_lod(6.0),
+        ));
 
         let mut sampler_lookup = HashMap::new();
         if let Some(samplers) = &info.samplers {
@@ -243,21 +242,17 @@ impl Gltf {
                         _ => panic!("Unhandled wrap_s value: {}", sampler.wrap_t),
                     };
 
-                    let sampler_ref = resource_manager.add_sampler(unsafe {
-                        device
-                            .create_sampler(
-                                &vk::SamplerCreateInfo::default()
-                                    .mag_filter(mag_filter)
-                                    .min_filter(min_filter)
-                                    .mipmap_mode(mipmap_mode)
-                                    .address_mode_u(address_mode_u)
-                                    .address_mode_v(address_mode_v)
-                                    .min_lod(0.0)
-                                    .max_lod(6.0),
-                                None,
-                            )
-                            .unwrap()
-                    });
+                    let sampler_ref = resource_manager.add_sampler(Sampler::new(
+                        device.clone(),
+                        &vk::SamplerCreateInfo::default()
+                            .mag_filter(mag_filter)
+                            .min_filter(min_filter)
+                            .mipmap_mode(mipmap_mode)
+                            .address_mode_u(address_mode_u)
+                            .address_mode_v(address_mode_v)
+                            .min_lod(0.0)
+                            .max_lod(6.0),
+                    ));
                     sampler_lookup.insert(sampler_id, sampler_ref);
                 });
         }
@@ -317,7 +312,7 @@ impl Gltf {
                             img.height(),
                         ),
                         if srgb_textures.contains(texture_id) {
-                            vk::Format::R8G8B8A8_UNORM // TODO: SRGB
+                            vk::Format::R8G8B8A8_SRGB
                         } else {
                             vk::Format::R8G8B8A8_UNORM
                         },
@@ -514,25 +509,13 @@ impl Gltf {
             &[0xFF80FF80u32],
         );
 
-        let metallic_roughness_fallback_texture = resource_manager.get_or_create_image(
-            ImageSize::Fixed(1, 1),
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-            1,
-            1,
-            "Metallic roughness fallback".to_owned(),
-            &[0xFF00FF00u32],
-        );
-
-        let emissive_fallback_texture = resource_manager.get_or_create_image(
-            ImageSize::Fixed(1, 1),
-            vk::Format::R8G8B8A8_SRGB,
-            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-            1,
-            1,
-            "Emissive fallback".to_owned(),
-            &[0xFFFFFFFFu32],
-        );
+        let opaque = (|| {
+            Some(matches!(
+                info.materials.as_ref()?[primitive.material?].alpha_mode,
+                AlphaMode::Opaque
+            ))
+        })()
+        .unwrap_or(true);
 
         let (base_color_texture_id, base_color_texcoord_id, base_color_sampler_id) = (|| {
             let texture = info.materials.as_ref()?[primitive.material?]
@@ -568,7 +551,7 @@ impl Gltf {
             let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
             Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
-        .unwrap_or((metallic_roughness_fallback_texture, 0, 0));
+        .unwrap_or((-1, 0, 0));
 
         let (emissive_texture_id, emissive_texcoord_id, emissive_sampler_id) = (|| {
             let texture = info.materials.as_ref()?[primitive.material?]
@@ -577,7 +560,7 @@ impl Gltf {
             let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
             Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
-        .unwrap_or((emissive_fallback_texture, 0, 0));
+        .unwrap_or((-1, 0, 0));
 
         let emissive_factor =
             (|| Some(info.materials.as_ref()?[primitive.material?].emissive_factor))().unwrap();
@@ -615,6 +598,7 @@ impl Gltf {
             indices,
             index_count as u32,
             positions_count as u32,
+            ModelRenderInfo { opaque },
         );
 
         Ok(Model { model_ref })

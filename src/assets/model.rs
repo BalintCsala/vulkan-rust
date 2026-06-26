@@ -3,6 +3,10 @@ use bevy::ecs::component::Component;
 
 use crate::rendering::resource_manager::{ImageReference, ModelReference, SamplerReference};
 
+pub struct ModelRenderInfo {
+    pub opaque: bool,
+}
+
 #[repr(C)]
 pub struct ModelData {
     pub positions: vk::DeviceAddress,

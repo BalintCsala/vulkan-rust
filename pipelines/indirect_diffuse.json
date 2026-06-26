@@ -1,12 +1,12 @@
 {
-  "structName": "RaytracingPipeline",
-  "shaderPath": "shaders/raytrace.slang",
+  "structName": "IndirectDiffusePipeline",
+  "shaderPath": "shaders/rt/indirect_diffuse.slang",
   "shaderInfo": {
     "type": "raytracing",
     "materials": [
       {
         "name": "gltf",
-        "shaderPath": "shaders/gltf_raytracing_material.slang",
+        "shaderPath": "shaders/rt/gltf_raytracing_material.slang",
         "closestHit": "chit",
         "anyHit": "ahit"
       }
@@ -36,12 +36,16 @@
       "name": "camera_position"
     },
     {
-      "type": "float2",
-      "name": "resolution"
+      "type": "storageImage",
+      "name": "gbuffer"
     },
     {
       "type": "storageImage",
-      "name": "output"
+      "name": "direct_lighting_output"
+    },
+    {
+      "type": "storageImage",
+      "name": "indirect_diffuse_output"
     },
     {
       "type": "uint",
