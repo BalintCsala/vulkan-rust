@@ -13,39 +13,5 @@
     ],
     "raygen": "rgen",
     "miss": "miss"
-  },
-  "inputs": [
-    {
-      "type": "accelerationStructure",
-      "name": "acceleration_structure"
-    },
-    {
-      "type": "buffer",
-      "name": "model_data"
-    },
-    {
-      "type": "buffer",
-      "name": "instance_data"
-    },
-    {
-      "type": "float4x4",
-      "name": "view_projection_inv"
-    },
-    {
-      "type": "float3",
-      "name": "camera_position"
-    },
-    {
-      "type": "float2",
-      "name": "resolution"
-    },
-    {
-      "type": "storageImage",
-      "name": "output"
-    },
-    {
-      "type": "uint",
-      "name": "frame"
-    }
-  ]
+  }
 }

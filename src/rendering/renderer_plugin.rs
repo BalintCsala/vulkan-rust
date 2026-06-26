@@ -6,15 +6,18 @@ use bevy::{
         entity::Entity,
         query::{Added, Changed},
         resource::Resource,
-        schedule::ScheduleLabel,
+        schedule::{IntoScheduleConfigs, ScheduleLabel},
         system::{Commands, Query, Res, ResMut, Single},
     },
     input::{ButtonInput, keyboard::KeyCode},
+    math::Vec3,
     transform::components::{GlobalTransform, Transform},
     window::{RawHandleWrapperHolder, Window},
 };
-use vulkan_utils::pipeline_generator::pipeline_types::{
-    ComputePipeline, GraphicsPipeline, Pipeline, RaytracingPipeline,
+use serde_json::de;
+use vulkan_utils::{
+    pipeline_generator::pipeline_types::{ComputePipeline, GraphicsPipeline, Pipeline},
+    utility_functions::full_subresource_range,
 };
 
 use crate::{
@@ -22,9 +25,9 @@ use crate::{
     rendering::{
         components::camera::Camera,
         generated_pipelines::{
-            MaterialsPipelinePushConstants, RaytracingPipelinePushConstants,
-            VisibilityPipelinePushConstants, create_materials_pipeline, create_raytracing_pipeline,
-            create_visibility_pipeline,
+            DirectLightingPipelinePushConstants, MaterialsPipelinePushConstants,
+            VisibilityPipelinePushConstants, create_direct_lighting_pipeline,
+            create_materials_pipeline, create_raytracing_pipeline, create_visibility_pipeline,
         },
         resource_manager::{ImageReference, ImageSize, InstanceReference, ResourceManager},
         vulkan_state::VulkanState,
@@ -40,8 +43,8 @@ struct Renderable {
 struct RendererState {
     visibility_pipeline: GraphicsPipeline,
     materials_pipeline: ComputePipeline,
-    ray_tracing_pipeline: RaytracingPipeline,
-
+    direct_lighting_pipeline: ComputePipeline,
+    // ray_tracing_pipeline: RaytracingPipeline,
     depth: ImageReference,
     visibility: ImageReference,
 
@@ -69,7 +72,7 @@ impl Plugin for RendererPlugin {
         schedule_order.insert_after(PreRendering, Rendering);
 
         app.add_systems(PreStartup, create_render_resources)
-            .add_systems(Update, update_frame)
+            .add_systems(Update, (reload_shaders, update_frame).chain())
             .add_systems(PreRendering, on_new_renderables)
             .add_systems(Rendering, render);
     }
@@ -107,23 +110,28 @@ fn create_render_resources(
         resource_manager.bindless_pipeline_layout,
     );
 
-    let ray_tracing_pipeline = create_raytracing_pipeline(
-        vulkan_state.instance.clone(),
-        vulkan_state.physical_device,
+    let direct_lighting_pipeline = create_direct_lighting_pipeline(
         vulkan_state.device.clone(),
-        vulkan_state.allocator.clone(),
         resource_manager.bindless_pipeline_layout,
     );
+
+    // let ray_tracing_pipeline = create_raytracing_pipeline(
+    //     vulkan_state.instance.clone(),
+    //     vulkan_state.physical_device,
+    //     vulkan_state.device.clone(),
+    //     vulkan_state.allocator.clone(),
+    //     resource_manager.bindless_pipeline_layout,
+    // );
 
     commands.insert_resource(RendererState {
         visibility_pipeline,
         materials_pipeline,
-        ray_tracing_pipeline,
-
+        direct_lighting_pipeline,
+        // ray_tracing_pipeline,
         depth: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
             vk::Format::D32_SFLOAT,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::STORAGE,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             1,
             1,
             "Depth".to_owned(),
@@ -186,6 +194,22 @@ fn create_render_resources(
     commands.insert_resource(vulkan_state);
 }
 
+fn reload_shaders(
+    keys: Res<ButtonInput<KeyCode>>,
+    vulkan_state: Res<VulkanState>,
+    mut renderer_state: ResMut<RendererState>,
+) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        unsafe {
+            vulkan_state.device.device_wait_idle().unwrap();
+        };
+
+        renderer_state.materials_pipeline.reload();
+        renderer_state.visibility_pipeline.reload();
+        renderer_state.direct_lighting_pipeline.reload();
+    }
+}
+
 fn update_frame(
     keys: Res<ButtonInput<KeyCode>>,
     mut renderer_state: ResMut<RendererState>,
@@ -233,7 +257,7 @@ fn render(
         return;
     }
 
-    // let light_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
+    let sun_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
 
     let command_buffer = vulkan_state.get_command_buffer();
     let camera_transform = camera.0;
@@ -243,6 +267,33 @@ fn render(
         * camera_transform.to_matrix().inverse();
 
     let device = vulkan_state.device.clone();
+
+    unsafe {
+        device.cmd_bind_descriptor_sets(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            resource_manager.bindless_pipeline_layout,
+            0,
+            &[resource_manager.descriptor_set],
+            &[],
+        );
+        device.cmd_bind_descriptor_sets(
+            command_buffer,
+            vk::PipelineBindPoint::COMPUTE,
+            resource_manager.bindless_pipeline_layout,
+            0,
+            &[resource_manager.descriptor_set],
+            &[],
+        );
+        // device.cmd_bind_descriptor_sets(
+        //     command_buffer,
+        //     vk::PipelineBindPoint::RAY_TRACING_KHR,
+        //     resource_manager.bindless_pipeline_layout,
+        //     0,
+        //     &[resource_manager.descriptor_set],
+        //     &[],
+        // );
+    }
 
     unsafe {
         device.cmd_pipeline_barrier2(
@@ -264,7 +315,7 @@ fn render(
                         vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
                             | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
                         vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     ),
                 resource_manager
                     .get_image_mut(&renderer_state.visibility)
@@ -279,36 +330,9 @@ fn render(
         );
     };
 
-    unsafe {
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            resource_manager.bindless_pipeline_layout,
-            0,
-            &[resource_manager.descriptor_set],
-            &[],
-        );
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            resource_manager.bindless_pipeline_layout,
-            0,
-            &[resource_manager.descriptor_set],
-            &[],
-        );
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::RAY_TRACING_KHR,
-            resource_manager.bindless_pipeline_layout,
-            0,
-            &[resource_manager.descriptor_set],
-            &[],
-        );
-    }
-
     let mut push_constants = VisibilityPipelinePushConstants {
         view_projection: [0.0; 16],
-        model_data: resource_manager.model_buffer.address,
+        models: resource_manager.model_buffer.address,
         instance_data: resource_manager.instance_buffer.address,
     };
 
@@ -399,8 +423,8 @@ fn render(
 
         let mut materials_push_constants = MaterialsPipelinePushConstants {
             view_projection: [0.0; 16],
-            model_data: resource_manager.model_buffer.address,
-            instance_data: resource_manager.instance_buffer.address,
+            models: resource_manager.model_buffer.address,
+            instances: resource_manager.instance_buffer.address,
             resolution: [
                 vulkan_state.extent.width as f32,
                 vulkan_state.extent.height as f32,
@@ -459,52 +483,88 @@ fn render(
                 command_buffer,
                 vk::PipelineStageFlags2::NONE,
                 vk::AccessFlags2::NONE,
-                vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR,
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
                 vk::AccessFlags2::SHADER_WRITE,
                 vk::ImageLayout::GENERAL,
             );
 
-        renderer_state.ray_tracing_pipeline.bind(command_buffer);
+        renderer_state.direct_lighting_pipeline.bind(command_buffer);
 
-        // Path tracing
-        let mut raytracing_push_constants = RaytracingPipelinePushConstants {
-            acceleration_structure: device
-                .acceleration_structure
-                .get_acceleration_structure_device_address(
-                    &vk::AccelerationStructureDeviceAddressInfoKHR::default()
-                        .acceleration_structure(resource_manager.tlas),
-                ),
-            model_data: resource_manager.model_buffer.address,
-            instance_data: resource_manager.instance_buffer.address,
-            view_projection_inv: [0.0; 16],
+        let mut direct_lighting_push_constants = DirectLightingPipelinePushConstants {
+            view_projection_inverse: [0.0; 16],
+            depth_texture_id: renderer_state.depth.into(),
+            base_color_id: renderer_state.base_color_output.into(),
+            normal_id: renderer_state.normal_output.into(),
+            metallic_roughness_id: renderer_state.metallic_roughness_output.into(),
+            emissive_id: renderer_state.emissive_output.into(),
+            output_id: renderer_state.direct_lighting.into(),
+            sun_direction: [0.0; 3],
+            sun_light: [2.0, 2.0, 2.0],
             camera_position: [0.0; 3],
-            output: renderer_state.direct_lighting.into(),
-            resolution: [
-                vulkan_state.extent.width as f32,
-                vulkan_state.extent.height as f32,
-            ],
-            frame: renderer_state.frame,
-            _pad0: 0,
+            resolution: [width as f32, height as f32],
         };
+
         view_projection
             .inverse()
-            .write_cols_to_slice(&mut raytracing_push_constants.view_projection_inv);
-
+            .write_cols_to_slice(&mut direct_lighting_push_constants.view_projection_inverse);
+        sun_direction.write_to_slice(&mut direct_lighting_push_constants.sun_direction);
         camera_transform
             .translation
-            .write_to_slice(raytracing_push_constants.camera_position.as_mut_slice());
+            .write_to_slice(&mut direct_lighting_push_constants.camera_position);
 
         device.cmd_push_constants(
             command_buffer,
             resource_manager.bindless_pipeline_layout,
             vk::ShaderStageFlags::ALL,
             0,
-            bytemuck::bytes_of(&raytracing_push_constants),
+            bytemuck::bytes_of(&direct_lighting_push_constants),
         );
 
         renderer_state
-            .ray_tracing_pipeline
-            .trace_rays(command_buffer, width, height, 1);
+            .direct_lighting_pipeline
+            .dispatch(command_buffer, width, height, 1);
+
+        // renderer_state.ray_tracing_pipeline.bind(command_buffer);
+
+        // Path tracing
+        // let mut raytracing_push_constants = RaytracingPipelinePushConstants {
+        //     acceleration_structure: device
+        //         .acceleration_structure
+        //         .get_acceleration_structure_device_address(
+        //             &vk::AccelerationStructureDeviceAddressInfoKHR::default()
+        //                 .acceleration_structure(resource_manager.tlas),
+        //         ),
+        //     model_data: resource_manager.model_buffer.address,
+        //     instance_data: resource_manager.instance_buffer.address,
+        //     view_projection_inv: [0.0; 16],
+        //     camera_position: [0.0; 3],
+        //     output: renderer_state.direct_lighting.into(),
+        //     resolution: [
+        //         vulkan_state.extent.width as f32,
+        //         vulkan_state.extent.height as f32,
+        //     ],
+        //     frame: renderer_state.frame,
+        //     _pad0: 0,
+        // };
+        // view_projection
+        //     .inverse()
+        //     .write_cols_to_slice(&mut raytracing_push_constants.view_projection_inv);
+        //
+        // camera_transform
+        //     .translation
+        //     .write_to_slice(raytracing_push_constants.camera_position.as_mut_slice());
+        //
+        // device.cmd_push_constants(
+        //     command_buffer,
+        //     resource_manager.bindless_pipeline_layout,
+        //     vk::ShaderStageFlags::ALL,
+        //     0,
+        //     bytemuck::bytes_of(&raytracing_push_constants),
+        // );
+
+        // renderer_state
+        //     .ray_tracing_pipeline
+        //     .trace_rays(command_buffer, width, height, 1);
 
         let current_image = vulkan_state.current_image();
         current_image.immediate_transition(
@@ -520,7 +580,7 @@ fn render(
             .get_image_mut(&renderer_state.direct_lighting)
             .immediate_transition(
                 command_buffer,
-                vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR,
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
                 vk::AccessFlags2::SHADER_WRITE,
                 vk::PipelineStageFlags2::BLIT,
                 vk::AccessFlags2::TRANSFER_READ,

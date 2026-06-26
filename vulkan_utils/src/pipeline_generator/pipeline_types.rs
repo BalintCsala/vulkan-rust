@@ -455,7 +455,7 @@ impl RaytracingPipeline {
 
         let total_group_count = hit_handle_count + 2;
 
-        let align_up = |x: u32, alignment: u32| x.div_ceil(alignment) * alignment;
+        let align_up = |x: u32, alignment: u32| x.next_multiple_of(alignment);
 
         let handle_size = rt_properties.shader_group_handle_size;
         let handle_alignment = rt_properties.shader_group_handle_alignment;

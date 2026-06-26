@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use ash::{
     ext::debug_utils,
-    khr::{
-        acceleration_structure, deferred_host_operations, ray_tracing_pipeline, surface, swapchain,
-    },
+    khr::{surface, swapchain},
     vk,
 };
 use bevy::ecs::resource::Resource;
@@ -163,7 +161,7 @@ impl VulkanState {
                 .unwrap_or(&surface_formats[0])
         };
 
-        let present_mode = vk::PresentModeKHR::FIFO;
+        let present_mode = vk::PresentModeKHR::MAILBOX;
 
         let surface_capabilities = unsafe {
             surface_instance
@@ -181,9 +179,9 @@ impl VulkanState {
                     .queue_priorities(&[1.0])])
                 .enabled_extension_names(&[
                     swapchain::NAME.as_ptr(),
-                    acceleration_structure::NAME.as_ptr(),
-                    ray_tracing_pipeline::NAME.as_ptr(),
-                    deferred_host_operations::NAME.as_ptr(),
+                    // acceleration_structure::NAME.as_ptr(),
+                    // ray_tracing_pipeline::NAME.as_ptr(),
+                    // deferred_host_operations::NAME.as_ptr(),
                 ])
                 .push_next(
                     &mut vk::PhysicalDeviceFeatures2::default().features(
@@ -213,15 +211,14 @@ impl VulkanState {
                     &mut vk::PhysicalDeviceVulkan13Features::default()
                         .synchronization2(true)
                         .dynamic_rendering(true),
-                )
-                .push_next(
-                    &mut vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
-                        .acceleration_structure(true),
-                )
-                .push_next(
-                    &mut vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default()
-                        .ray_tracing_pipeline(true),
-                ),
+                ), // .push_next(
+                   //     &mut vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+                   //         .acceleration_structure(true),
+                   // )
+                   // .push_next(
+                   //     &mut vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default()
+                   //         .ray_tracing_pipeline(true),
+                   // ),
         ));
 
         let queue = unsafe {

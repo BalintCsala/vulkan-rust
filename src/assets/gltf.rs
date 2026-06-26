@@ -424,8 +424,9 @@ impl Gltf {
             let mut buffer = Buffer::new(
                 device,
                 allocator.clone(),
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                // vk::BufferUsageFlags::STORAGE_BUFFER
+                //     | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
                 data.len() as u64,
                 &format!("{mesh_name} {name}"),
             );
@@ -471,8 +472,9 @@ impl Gltf {
                 let mut indices = Buffer::new(
                     device,
                     allocator.clone(),
-                    vk::BufferUsageFlags::INDEX_BUFFER
-                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                    // vk::BufferUsageFlags::INDEX_BUFFER
+                    //     | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                    vk::BufferUsageFlags::INDEX_BUFFER,
                     data.len() as u64,
                     &indices_name,
                 );
@@ -484,8 +486,9 @@ impl Gltf {
                 let mut indices = Buffer::new(
                     device,
                     allocator.clone(),
-                    vk::BufferUsageFlags::INDEX_BUFFER
-                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                    // vk::BufferUsageFlags::INDEX_BUFFER
+                    //     | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                    vk::BufferUsageFlags::INDEX_BUFFER,
                     positions_count as u64,
                     &indices_name,
                 );

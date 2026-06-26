@@ -30,7 +30,7 @@ const SAMPLER_COUNT: u32 = 65536;
 const MAX_MODEL_DATA_COUNT: usize = 16384;
 
 const STAGING_BUFFER_SIZE: usize = 0x8000000; // 128MB
-const RT_INSTANCE_BUFFER_SIZE: u64 = 0x10000000; // 256MB
+// const RT_INSTANCE_BUFFER_SIZE: u64 = 0x10000000; // 256MB
 
 pub enum ImageSize {
     Fixed(u32, u32),
@@ -147,14 +147,13 @@ pub struct ResourceManager {
     pub model_buffer: Buffer,
     pub index_data: Vec<IndexData>,
     next_model_ref: ModelReference,
-    pub model_blases: Vec<vk::AccelerationStructureKHR>,
-    pending_blas_builds: Vec<PendingBlasBuild>,
-    pub tlas: vk::AccelerationStructureKHR,
-    acceleration_structure_buffers: Vec<Buffer>,
-
+    // pub model_blases: Vec<vk::AccelerationStructureKHR>,
+    // pending_blas_builds: Vec<PendingBlasBuild>,
+    // pub tlas: vk::AccelerationStructureKHR,
+    // acceleration_structure_buffers: Vec<Buffer>,
     pub instance_buffer: Buffer,
-    rt_instances: Vec<RTInstance>,
-    rt_instance_buffer: Buffer,
+    // rt_instances: Vec<RTInstance>,
+    // rt_instance_buffer: Buffer,
     next_instance_ref: InstanceReference,
 
     staging_buffer: Buffer,
@@ -282,13 +281,13 @@ impl ResourceManager {
 
         let mipmap_pipeline = create_mipmap_pipeline(device.clone(), bindless_pipeline_layout);
 
-        let rt_instance_buffer = Buffer::new(
-            &device,
-            allocator.clone(),
-            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-            RT_INSTANCE_BUFFER_SIZE,
-            "RT Instance Buffer",
-        );
+        // let rt_instance_buffer = Buffer::new(
+        //     &device,
+        //     allocator.clone(),
+        //     vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+        //     RT_INSTANCE_BUFFER_SIZE,
+        //     "RT Instance Buffer",
+        // );
 
         Self {
             device,
@@ -307,13 +306,12 @@ impl ResourceManager {
             model_buffer,
             index_data: Vec::new(),
             next_model_ref: 0,
-            model_blases: Vec::new(),
-            pending_blas_builds: Vec::new(),
-            acceleration_structure_buffers: Vec::new(),
-            tlas: vk::AccelerationStructureKHR::null(),
-            rt_instances: Vec::new(),
-            rt_instance_buffer,
-
+            // model_blases: Vec::new(),
+            // pending_blas_builds: Vec::new(),
+            // acceleration_structure_buffers: Vec::new(),
+            // tlas: vk::AccelerationStructureKHR::null(),
+            // rt_instances: Vec::new(),
+            // rt_instance_buffer,
             command_cache,
             staging_buffer,
             staging_buffer_offset: 0,
@@ -615,7 +613,7 @@ impl ResourceManager {
             ));
 
             self.staging_buffer_offset += required_space;
-            self.staging_buffer_offset = self.staging_buffer_offset.div_ceil(16) * 16;
+            self.staging_buffer_offset = self.staging_buffer_offset.next_multiple_of(16);
         }
 
         self.dispatch_copy_from_staging(command_buffer, pending_barriers.as_slice());
@@ -652,7 +650,7 @@ impl ResourceManager {
                             vk::ShaderStageFlags::ALL,
                             0,
                             bytemuck::bytes_of(&MipmapPipelinePushConstants {
-                                base_image_id: *reference as i32,
+                                base_image_id: *reference as u32,
                                 num_of_mips: info.image.get_mip_count(),
                             }),
                         );
@@ -804,13 +802,13 @@ impl ResourceManager {
         let reference = self.next_model_ref;
         self.next_model_ref += 1;
 
-        self.pending_blas_builds.push(PendingBlasBuild {
-            position_device_address: model.positions,
-            index_device_address: model.indices,
-            position_count,
-            index_count,
-            reference,
-        });
+        // self.pending_blas_builds.push(PendingBlasBuild {
+        //     position_device_address: model.positions,
+        //     index_device_address: model.indices,
+        //     position_count,
+        //     index_count,
+        //     reference,
+        // });
 
         self.model_buffer
             .write(&[model], size_of::<ModelData>() * reference as usize);
@@ -820,274 +818,274 @@ impl ResourceManager {
             index_count,
         });
 
-        self.model_blases.push(vk::AccelerationStructureKHR::null());
+        // self.model_blases.push(vk::AccelerationStructureKHR::null());
 
         reference
     }
 
     pub fn build_acceleration_structures(&mut self, device: &Arc<Device>) {
-        if self.pending_blas_builds.is_empty() {
-            return;
-        }
-
-        let mut build_infos = Vec::new();
-        let mut build_range_infos = Vec::new();
-
-        let geometries: Vec<_> = self
-            .pending_blas_builds
-            .iter()
-            .map(|build_data| {
-                [vk::AccelerationStructureGeometryKHR::default()
-                    .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                    .geometry(vk::AccelerationStructureGeometryDataKHR {
-                        triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::default()
-                            .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                            .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: build_data.position_device_address,
-                            })
-                            .vertex_stride(size_of::<Vec3>() as u64)
-                            .max_vertex(build_data.position_count - 1)
-                            .index_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: build_data.index_device_address,
-                            })
-                            .index_type(vk::IndexType::UINT32),
-                    })]
-            })
-            .collect();
-
-        let build_ranges: Vec<_> = self
-            .pending_blas_builds
-            .iter()
-            .map(|build_data| {
-                [vk::AccelerationStructureBuildRangeInfoKHR::default()
-                    .primitive_count(build_data.index_count / 3)]
-            })
-            .collect();
-
-        let mut scratch_buffers = Vec::new();
-
-        self.pending_blas_builds
-            .iter()
-            .zip(geometries.iter())
-            .zip(build_ranges.iter())
-            .for_each(|((build_data, geometries), build_range)| {
-                let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
-                    .geometries(geometries)
-                    .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-                    .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE);
-
-                let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
-                unsafe {
-                    device
-                        .acceleration_structure
-                        .get_acceleration_structure_build_sizes(
-                            vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                            &build_info,
-                            &[build_data.index_count / 3],
-                            &mut size_info,
-                        );
-                };
-
-                let blas_buffer = Buffer::new(
-                    &self.device,
-                    self.allocator.clone(),
-                    vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
-                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-                    size_info.acceleration_structure_size,
-                    &format!("BLAS buffer #{}", self.acceleration_structure_buffers.len()),
-                );
-
-                let scratch_buffer = Buffer::new(
-                    &self.device,
-                    self.allocator.clone(),
-                    vk::BufferUsageFlags::STORAGE_BUFFER,
-                    size_info.build_scratch_size,
-                    "BLAS scratch buffer",
-                );
-
-                build_info = build_info.scratch_data(vk::DeviceOrHostAddressKHR {
-                    device_address: scratch_buffer.address,
-                });
-
-                let blas = unsafe {
-                    device
-                        .acceleration_structure
-                        .create_acceleration_structure(
-                            &vk::AccelerationStructureCreateInfoKHR::default()
-                                .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-                                .buffer(blas_buffer.handle)
-                                .size(size_info.acceleration_structure_size),
-                            None,
-                        )
-                        .unwrap()
-                };
-                build_info = build_info.dst_acceleration_structure(blas);
-
-                self.model_blases[build_data.reference as usize] = blas;
-                self.acceleration_structure_buffers.push(blas_buffer);
-                scratch_buffers.push(scratch_buffer);
-                build_infos.push(build_info);
-                build_range_infos.push(build_range.as_slice());
-            });
-
-        let blas_handles: Vec<_> = self
-            .model_blases
-            .iter()
-            .map(|&blas| unsafe {
-                device
-                    .acceleration_structure
-                    .get_acceleration_structure_device_address(
-                        &vk::AccelerationStructureDeviceAddressInfoKHR::default()
-                            .acceleration_structure(blas),
-                    )
-            })
-            .collect();
-
-        let rt_instance_data: Vec<_> = self
-            .rt_instances
-            .iter()
-            .enumerate()
-            .map(
-                |(reference, instance_data)| vk::AccelerationStructureInstanceKHR {
-                    transform: instance_data.transform,
-                    instance_custom_index_and_mask: vk::Packed24_8::new(reference as u32, 0xFF),
-                    instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
-                        0,
-                        vk::GeometryInstanceFlagsKHR::empty().as_raw() as u8,
-                    ),
-                    acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                        device_handle: blas_handles[instance_data.model_reference as usize],
-                    },
-                },
-            )
-            .collect();
-        self.rt_instance_buffer.write(&rt_instance_data, 0);
-
-        let tlas_geometries = [vk::AccelerationStructureGeometryKHR::default()
-            .geometry_type(vk::GeometryTypeKHR::INSTANCES)
-            .geometry(vk::AccelerationStructureGeometryDataKHR {
-                instances: vk::AccelerationStructureGeometryInstancesDataKHR::default()
-                    .array_of_pointers(false)
-                    .data(vk::DeviceOrHostAddressConstKHR {
-                        device_address: self.rt_instance_buffer.address,
-                    }),
-            })];
-
-        let mut tlas_build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
-            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-            .dst_acceleration_structure(self.tlas)
-            .geometries(&tlas_geometries)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE);
-
-        let mut tlas_build_sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
-        unsafe {
-            device
-                .acceleration_structure
-                .get_acceleration_structure_build_sizes(
-                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                    &tlas_build_info,
-                    &[self.rt_instances.len() as u32],
-                    &mut tlas_build_sizes,
-                );
-        };
-
-        let tlas_buffer = Buffer::new(
-            &self.device,
-            self.allocator.clone(),
-            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
-                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-            tlas_build_sizes.acceleration_structure_size,
-            "TLAS Buffer",
-        );
-
-        self.tlas = unsafe {
-            device
-                .acceleration_structure
-                .create_acceleration_structure(
-                    &vk::AccelerationStructureCreateInfoKHR::default()
-                        .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-                        .buffer(tlas_buffer.handle)
-                        .size(tlas_build_sizes.acceleration_structure_size),
-                    None,
-                )
-                .unwrap()
-        };
-        tlas_build_info = tlas_build_info.dst_acceleration_structure(self.tlas);
-        self.acceleration_structure_buffers.push(tlas_buffer);
-
-        let tlas_scratch_buffer = Buffer::new(
-            &self.device,
-            self.allocator.clone(),
-            vk::BufferUsageFlags::STORAGE_BUFFER,
-            tlas_build_sizes.build_scratch_size,
-            "TLAS Scratch Buffer",
-        );
-        tlas_build_info = tlas_build_info.scratch_data(vk::DeviceOrHostAddressKHR {
-            device_address: tlas_scratch_buffer.address,
-        });
-
-        let tlas_build_range_info = [vk::AccelerationStructureBuildRangeInfoKHR::default()
-            .first_vertex(0)
-            .transform_offset(0)
-            .primitive_offset(0)
-            .primitive_count(self.rt_instances.len() as u32)];
-
-        let fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .unwrap()
-        };
-
-        let command_buffer = self.command_cache.get_command_buffer();
-        unsafe {
-            device
-                .acceleration_structure
-                .cmd_build_acceleration_structures(command_buffer, &build_infos, &build_range_infos)
-        };
-
-        unsafe {
-            self.device.cmd_pipeline_barrier2(
-                command_buffer,
-                &vk::DependencyInfo::default().memory_barriers(&[vk::MemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
-                    .src_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR)
-                    .dst_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
-                    .dst_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR)]),
-            );
-        }
-
-        unsafe {
-            device
-                .acceleration_structure
-                .cmd_build_acceleration_structures(
-                    command_buffer,
-                    &[tlas_build_info],
-                    &[&tlas_build_range_info],
-                );
-        }
-
-        unsafe {
-            self.device.end_command_buffer(command_buffer).unwrap();
-        };
-
-        unsafe {
-            self.device
-                .queue_submit(
-                    self.queue,
-                    &[vk::SubmitInfo::default().command_buffers(&[command_buffer])],
-                    fence,
-                )
-                .unwrap();
-        };
-
-        unsafe {
-            self.device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .unwrap();
-        };
-        self.pending_blas_builds.clear();
+        // if self.pending_blas_builds.is_empty() {
+        //     return;
+        // }
+        //
+        // let mut build_infos = Vec::new();
+        // let mut build_range_infos = Vec::new();
+        //
+        // let geometries: Vec<_> = self
+        //     .pending_blas_builds
+        //     .iter()
+        //     .map(|build_data| {
+        //         [vk::AccelerationStructureGeometryKHR::default()
+        //             .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+        //             .geometry(vk::AccelerationStructureGeometryDataKHR {
+        //                 triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+        //                     .vertex_format(vk::Format::R32G32B32_SFLOAT)
+        //                     .vertex_data(vk::DeviceOrHostAddressConstKHR {
+        //                         device_address: build_data.position_device_address,
+        //                     })
+        //                     .vertex_stride(size_of::<Vec3>() as u64)
+        //                     .max_vertex(build_data.position_count - 1)
+        //                     .index_data(vk::DeviceOrHostAddressConstKHR {
+        //                         device_address: build_data.index_device_address,
+        //                     })
+        //                     .index_type(vk::IndexType::UINT32),
+        //             })]
+        //     })
+        //     .collect();
+        //
+        // let build_ranges: Vec<_> = self
+        //     .pending_blas_builds
+        //     .iter()
+        //     .map(|build_data| {
+        //         [vk::AccelerationStructureBuildRangeInfoKHR::default()
+        //             .primitive_count(build_data.index_count / 3)]
+        //     })
+        //     .collect();
+        //
+        // let mut scratch_buffers = Vec::new();
+        //
+        // self.pending_blas_builds
+        //     .iter()
+        //     .zip(geometries.iter())
+        //     .zip(build_ranges.iter())
+        //     .for_each(|((build_data, geometries), build_range)| {
+        //         let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+        //             .geometries(geometries)
+        //             .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+        //             .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+        //             .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE);
+        //
+        //         let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+        //         unsafe {
+        //             device
+        //                 .acceleration_structure
+        //                 .get_acceleration_structure_build_sizes(
+        //                     vk::AccelerationStructureBuildTypeKHR::DEVICE,
+        //                     &build_info,
+        //                     &[build_data.index_count / 3],
+        //                     &mut size_info,
+        //                 );
+        //         };
+        //
+        //         let blas_buffer = Buffer::new(
+        //             &self.device,
+        //             self.allocator.clone(),
+        //             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+        //                 | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+        //             size_info.acceleration_structure_size,
+        //             &format!("BLAS buffer #{}", self.acceleration_structure_buffers.len()),
+        //         );
+        //
+        //         let scratch_buffer = Buffer::new(
+        //             &self.device,
+        //             self.allocator.clone(),
+        //             vk::BufferUsageFlags::STORAGE_BUFFER,
+        //             size_info.build_scratch_size,
+        //             "BLAS scratch buffer",
+        //         );
+        //
+        //         build_info = build_info.scratch_data(vk::DeviceOrHostAddressKHR {
+        //             device_address: scratch_buffer.address,
+        //         });
+        //
+        //         let blas = unsafe {
+        //             device
+        //                 .acceleration_structure
+        //                 .create_acceleration_structure(
+        //                     &vk::AccelerationStructureCreateInfoKHR::default()
+        //                         .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+        //                         .buffer(blas_buffer.handle)
+        //                         .size(size_info.acceleration_structure_size),
+        //                     None,
+        //                 )
+        //                 .unwrap()
+        //         };
+        //         build_info = build_info.dst_acceleration_structure(blas);
+        //
+        //         self.model_blases[build_data.reference as usize] = blas;
+        //         self.acceleration_structure_buffers.push(blas_buffer);
+        //         scratch_buffers.push(scratch_buffer);
+        //         build_infos.push(build_info);
+        //         build_range_infos.push(build_range.as_slice());
+        //     });
+        //
+        // let blas_handles: Vec<_> = self
+        //     .model_blases
+        //     .iter()
+        //     .map(|&blas| unsafe {
+        //         device
+        //             .acceleration_structure
+        //             .get_acceleration_structure_device_address(
+        //                 &vk::AccelerationStructureDeviceAddressInfoKHR::default()
+        //                     .acceleration_structure(blas),
+        //             )
+        //     })
+        //     .collect();
+        //
+        // let rt_instance_data: Vec<_> = self
+        //     .rt_instances
+        //     .iter()
+        //     .enumerate()
+        //     .map(
+        //         |(reference, instance_data)| vk::AccelerationStructureInstanceKHR {
+        //             transform: instance_data.transform,
+        //             instance_custom_index_and_mask: vk::Packed24_8::new(reference as u32, 0xFF),
+        //             instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
+        //                 0,
+        //                 vk::GeometryInstanceFlagsKHR::empty().as_raw() as u8,
+        //             ),
+        //             acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+        //                 device_handle: blas_handles[instance_data.model_reference as usize],
+        //             },
+        //         },
+        //     )
+        //     .collect();
+        // self.rt_instance_buffer.write(&rt_instance_data, 0);
+        //
+        // let tlas_geometries = [vk::AccelerationStructureGeometryKHR::default()
+        //     .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+        //     .geometry(vk::AccelerationStructureGeometryDataKHR {
+        //         instances: vk::AccelerationStructureGeometryInstancesDataKHR::default()
+        //             .array_of_pointers(false)
+        //             .data(vk::DeviceOrHostAddressConstKHR {
+        //                 device_address: self.rt_instance_buffer.address,
+        //             }),
+        //     })];
+        //
+        // let mut tlas_build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+        //     .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+        //     .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+        //     .dst_acceleration_structure(self.tlas)
+        //     .geometries(&tlas_geometries)
+        //     .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE);
+        //
+        // let mut tlas_build_sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
+        // unsafe {
+        //     device
+        //         .acceleration_structure
+        //         .get_acceleration_structure_build_sizes(
+        //             vk::AccelerationStructureBuildTypeKHR::DEVICE,
+        //             &tlas_build_info,
+        //             &[self.rt_instances.len() as u32],
+        //             &mut tlas_build_sizes,
+        //         );
+        // };
+        //
+        // let tlas_buffer = Buffer::new(
+        //     &self.device,
+        //     self.allocator.clone(),
+        //     vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+        //         | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+        //     tlas_build_sizes.acceleration_structure_size,
+        //     "TLAS Buffer",
+        // );
+        //
+        // self.tlas = unsafe {
+        //     device
+        //         .acceleration_structure
+        //         .create_acceleration_structure(
+        //             &vk::AccelerationStructureCreateInfoKHR::default()
+        //                 .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+        //                 .buffer(tlas_buffer.handle)
+        //                 .size(tlas_build_sizes.acceleration_structure_size),
+        //             None,
+        //         )
+        //         .unwrap()
+        // };
+        // tlas_build_info = tlas_build_info.dst_acceleration_structure(self.tlas);
+        // self.acceleration_structure_buffers.push(tlas_buffer);
+        //
+        // let tlas_scratch_buffer = Buffer::new(
+        //     &self.device,
+        //     self.allocator.clone(),
+        //     vk::BufferUsageFlags::STORAGE_BUFFER,
+        //     tlas_build_sizes.build_scratch_size,
+        //     "TLAS Scratch Buffer",
+        // );
+        // tlas_build_info = tlas_build_info.scratch_data(vk::DeviceOrHostAddressKHR {
+        //     device_address: tlas_scratch_buffer.address,
+        // });
+        //
+        // let tlas_build_range_info = [vk::AccelerationStructureBuildRangeInfoKHR::default()
+        //     .first_vertex(0)
+        //     .transform_offset(0)
+        //     .primitive_offset(0)
+        //     .primitive_count(self.rt_instances.len() as u32)];
+        //
+        // let fence = unsafe {
+        //     self.device
+        //         .create_fence(&vk::FenceCreateInfo::default(), None)
+        //         .unwrap()
+        // };
+        //
+        // let command_buffer = self.command_cache.get_command_buffer();
+        // unsafe {
+        //     device
+        //         .acceleration_structure
+        //         .cmd_build_acceleration_structures(command_buffer, &build_infos, &build_range_infos)
+        // };
+        //
+        // unsafe {
+        //     self.device.cmd_pipeline_barrier2(
+        //         command_buffer,
+        //         &vk::DependencyInfo::default().memory_barriers(&[vk::MemoryBarrier2::default()
+        //             .src_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
+        //             .src_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR)
+        //             .dst_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
+        //             .dst_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR)]),
+        //     );
+        // }
+        //
+        // unsafe {
+        //     device
+        //         .acceleration_structure
+        //         .cmd_build_acceleration_structures(
+        //             command_buffer,
+        //             &[tlas_build_info],
+        //             &[&tlas_build_range_info],
+        //         );
+        // }
+        //
+        // unsafe {
+        //     self.device.end_command_buffer(command_buffer).unwrap();
+        // };
+        //
+        // unsafe {
+        //     self.device
+        //         .queue_submit(
+        //             self.queue,
+        //             &[vk::SubmitInfo::default().command_buffers(&[command_buffer])],
+        //             fence,
+        //         )
+        //         .unwrap();
+        // };
+        //
+        // unsafe {
+        //     self.device
+        //         .wait_for_fences(&[fence], true, u64::MAX)
+        //         .unwrap();
+        // };
+        // self.pending_blas_builds.clear();
     }
 
     pub fn create_instance(
@@ -1112,12 +1110,12 @@ impl ResourceManager {
                 .row(i)
                 .write_to_slice(&mut rt_instance[start_index..start_index + 4]);
         }
-        self.rt_instances.push(RTInstance {
-            transform: vk::TransformMatrixKHR {
-                matrix: rt_instance,
-            },
-            model_reference: *model_ref,
-        });
+        // self.rt_instances.push(RTInstance {
+        //     transform: vk::TransformMatrixKHR {
+        //         matrix: rt_instance,
+        //     },
+        //     model_reference: *model_ref,
+        // });
 
         Mat3::from_mat4(*model_matrix)
             .transpose()

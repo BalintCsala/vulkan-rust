@@ -5,10 +5,7 @@ import lib.tonemap;
 
 struct PushConstants {
     float4x4 viewProjectionInverse;
-    float4x4 shadowViewProjection;
     int depthTextureId;
-    int shadowDepthId;
-    int nearestSampler;
     int baseColorId;
     int normalId;
     int metallicRoughnessId;
@@ -27,7 +24,7 @@ PushConstants pushConstants;
 [numthreads(8, 8)]
 void cs(uint2 gid: SV_DispatchThreadID) {
     var outputTexture = getStorageImage<RWTexture2D<float4>>(pushConstants.outputId);
-    var depthTexture = getStorageImage<RWTexture2D<float>>(pushConstants.depthTextureId);
+    var depthTexture = getSampledImage<Texture2D<float>>(pushConstants.depthTextureId);
     float depth = depthTexture[gid];
     if (depth == 1.0) {
         outputTexture[gid] = float4(0, 0, 0, 1);
@@ -38,8 +35,6 @@ void cs(uint2 gid: SV_DispatchThreadID) {
     var normalTexture = getStorageImage<RWTexture2D<float4>>(pushConstants.normalId);
     var metallicRoughnessTexture = getStorageImage<RWTexture2D<float2>>(pushConstants.metallicRoughnessId);
     var emissiveTexture = getStorageImage<RWTexture2D<float4>>(pushConstants.emissiveId);
-    var shadowDepth = getSampledImage<Texture2D<float>>(pushConstants.shadowDepthId);
-    var nearestSampler = getSampler<SamplerState>(pushConstants.nearestSampler);
 
     Material material;
     material.f0 = 0.04;
@@ -59,20 +54,14 @@ void cs(uint2 gid: SV_DispatchThreadID) {
     float4 temp = mul(pushConstants.viewProjectionInverse, float4(screen, 1.0));
     float3 world = temp.xyz / temp.w;
 
-    float4 shadowClip = mul(pushConstants.shadowViewProjection, float4(world, 1.0));
-    float3 shadowScreen = shadowClip.xyz / shadowClip.w * float3(0.5, 0.5, 1.0) + float3(0.5, 0.5, 0.0);
-    float shadow = shadowDepth.SampleLevel(nearestSampler, shadowScreen.xy, 0.0);
-
     float3 lightIntensity = pushConstants.sunLight;
-    if (shadow + 0.003 < shadowScreen.z) {
-        lightIntensity = 0.0;
-    }
 
     float3 view = normalize(pushConstants.cameraPosition - world);
 
     float3 radiance = material.brdf(view, pushConstants.sunDirection) * lightIntensity;
     radiance += material.baseColor.rgb * (1.0 - material.metallic) * float3(0.57, 0.79, 1) * 0.3;
     outputTexture[gid] = float4(tonemap(radiance), 1.0);
+    outputTexture[gid] = float4(material.normal * 0.5 + 0.5, 1.0);
 }
 
 
