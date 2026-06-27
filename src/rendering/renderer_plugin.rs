@@ -8,15 +8,18 @@ use bevy::{
         entity::Entity,
         query::{Added, Changed},
         resource::Resource,
-        schedule::ScheduleLabel,
+        schedule::{IntoScheduleConfigs, ScheduleLabel},
         system::{Commands, Query, Res, ResMut, Single},
     },
     input::{ButtonInput, keyboard::KeyCode},
+    math::Vec3,
     transform::components::{GlobalTransform, Transform},
     window::{RawHandleWrapperHolder, Window},
 };
 use vulkan_utils::{
-    pipeline_generator::pipeline_types::{ComputePipeline, Pipeline, RaytracingPipeline},
+    pipeline_generator::pipeline_types::{
+        ComputePipeline, GraphicsPipeline, Pipeline, RaytracingPipeline,
+    },
     wrappers::device::Device,
 };
 
@@ -26,7 +29,8 @@ use crate::{
         components::camera::Camera,
         generated_pipelines::{
             DirectLightingPipelinePushConstants, TonemapPipelinePushConstants,
-            create_direct_lighting_pipeline, create_tonemap_pipeline,
+            create_direct_lighting_pipeline, create_materials_pipeline, create_tonemap_pipeline,
+            create_visibility_pipeline,
         },
         resource_manager::{ImageReference, ImageSize, ResourceManager},
         vulkan_state::VulkanState,
@@ -39,9 +43,13 @@ struct Renderable;
 #[derive(Resource)]
 struct RendererState {
     device: Arc<Device>,
+    visibility_pipeline: GraphicsPipeline,
+    materials_pipeline: ComputePipeline,
     direct_lighting_pipeline: RaytracingPipeline,
     tonemap_pipeline: ComputePipeline,
 
+    depth: ImageReference,
+    visibility: ImageReference,
     gbuffer: ImageReference,
     direct_lighting: ImageReference,
     indirect_diffuse: ImageReference,
@@ -65,7 +73,7 @@ impl Plugin for RendererPlugin {
         schedule_order.insert_after(PreRendering, Rendering);
 
         app.add_systems(PreStartup, create_render_resources)
-            .add_systems(Update, update_frame)
+            .add_systems(Update, (reload_shaders, update_frame).chain())
             .add_systems(PreRendering, on_new_renderables)
             .add_systems(Rendering, render);
     }
@@ -101,6 +109,16 @@ fn create_render_resources(
         resource_manager.bindless_pipeline_layout,
     );
 
+    let visibility_pipeline = create_visibility_pipeline(
+        vulkan_state.device.clone(),
+        resource_manager.bindless_pipeline_layout,
+    );
+
+    let materials_pipeline = create_materials_pipeline(
+        vulkan_state.device.clone(),
+        resource_manager.bindless_pipeline_layout,
+    );
+
     let tonemap_pipeline = create_tonemap_pipeline(
         vulkan_state.device.clone(),
         resource_manager.bindless_pipeline_layout,
@@ -108,16 +126,36 @@ fn create_render_resources(
 
     commands.insert_resource(RendererState {
         device: vulkan_state.device.clone(),
+        visibility_pipeline,
+        materials_pipeline,
         direct_lighting_pipeline,
         tonemap_pipeline,
 
         gbuffer: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
             vk::Format::R32G32B32A32_UINT,
-            vk::ImageUsageFlags::STORAGE,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::COLOR_ATTACHMENT,
             1,
             1,
-            "Gbuffer image".to_owned(),
+            "Gbuffer".to_owned(),
+        ),
+        depth: resource_manager.create_empty_image(
+            ImageSize::Scaled(1.0, 1.0),
+            vk::Format::D32_SFLOAT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            1,
+            1,
+            "Depth".to_owned(),
+        ),
+        visibility: resource_manager.create_empty_image(
+            ImageSize::Scaled(1.0, 1.0),
+            vk::Format::R32_UINT,
+            vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            1,
+            1,
+            "Visibility".to_owned(),
         ),
 
         direct_lighting: resource_manager.create_empty_image(
@@ -150,6 +188,22 @@ fn create_render_resources(
     });
     commands.insert_resource(resource_manager);
     commands.insert_resource(vulkan_state);
+}
+
+fn reload_shaders(
+    keys: Res<ButtonInput<KeyCode>>,
+    vulkan_state: Res<VulkanState>,
+    mut renderer_state: ResMut<RendererState>,
+) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        unsafe {
+            vulkan_state.device.device_wait_idle().unwrap();
+        };
+
+        renderer_state.materials_pipeline.reload();
+        renderer_state.visibility_pipeline.reload();
+        renderer_state.direct_lighting_pipeline.reload();
+    }
 }
 
 fn update_frame(
@@ -201,6 +255,9 @@ fn render(
     }
 
     let (camera_transform, camera_data) = *camera;
+    let sun_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
+
+    let command_buffer = vulkan_state.get_command_buffer();
     let view_projection = camera_data
         .projection_matrix(vulkan_state.extent.width, vulkan_state.extent.height)
         * camera_transform.to_matrix().inverse();
@@ -231,13 +288,15 @@ fn render(
             command_buffer,
             &vk::DependencyInfo::default().image_memory_barriers(&[
                 resource_manager
-                    .get_image_mut(&renderer_state.gbuffer)
+                    .get_image_mut(&renderer_state.depth)
                     .get_transition_barrier(
-                        vk::PipelineStageFlags2::NONE,
-                        vk::AccessFlags2::NONE,
-                        vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR,
-                        vk::AccessFlags2::SHADER_WRITE,
-                        vk::ImageLayout::GENERAL,
+                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     ),
                 resource_manager
                     .get_image_mut(&renderer_state.direct_lighting)
@@ -255,7 +314,7 @@ fn render(
     // Path tracing
     renderer_state.direct_lighting_pipeline.bind(command_buffer);
     let mut direct_lighting_push_constants = DirectLightingPipelinePushConstants {
-        acceleration_structure: unsafe {
+        tlas: unsafe {
             device
                 .acceleration_structure
                 .get_acceleration_structure_device_address(
@@ -263,12 +322,12 @@ fn render(
                         .acceleration_structure(resource_manager.tlas),
                 )
         },
-        model_data: resource_manager.model_buffer.address,
-        instance_data: resource_manager.instance_buffer.address,
+        models: resource_manager.model_buffer.address,
+        instances: resource_manager.instance_buffer.address,
         view_projection_inv: [0.0; 16],
         camera_position: [0.0; 3],
-        gbuffer: renderer_state.gbuffer.into(),
-        direct_lighting_output: renderer_state.direct_lighting.into(),
+        gbuffer_id: renderer_state.gbuffer.into(),
+        direct_lighting_output_id: renderer_state.direct_lighting.into(),
         frame: renderer_state.frame,
     };
 
@@ -324,10 +383,10 @@ fn render(
     // Tonemapping
     renderer_state.tonemap_pipeline.bind(command_buffer);
     let tonemap_push_constants = TonemapPipelinePushConstants {
-        gbuffer: renderer_state.gbuffer.into(),
-        direct_lighting_output: renderer_state.direct_lighting.into(),
-        indirect_diffuse_output: renderer_state.indirect_diffuse.into(),
-        output: renderer_state.output.into(),
+        gbuffer_id: renderer_state.gbuffer.into(),
+        direct_lighting_output_id: renderer_state.direct_lighting.into(),
+        indirect_diffuse_output_id: renderer_state.indirect_diffuse.into(),
+        output_id: renderer_state.output.into(),
     };
     unsafe {
         device.cmd_push_constants(

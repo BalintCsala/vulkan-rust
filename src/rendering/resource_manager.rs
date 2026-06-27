@@ -312,6 +312,7 @@ impl ResourceManager {
             model_buffer,
             index_data: Vec::new(),
             next_model_ref: 0,
+
             model_blases: Vec::new(),
             pending_blas_builds: Vec::new(),
             acceleration_structure_buffers: Vec::new(),
@@ -621,7 +622,7 @@ impl ResourceManager {
             ));
 
             self.staging_buffer_offset += required_space;
-            self.staging_buffer_offset = self.staging_buffer_offset.div_ceil(16) * 16;
+            self.staging_buffer_offset = self.staging_buffer_offset.next_multiple_of(16);
         }
 
         self.dispatch_copy_from_staging(command_buffer, pending_barriers.as_slice());
@@ -658,7 +659,7 @@ impl ResourceManager {
                             vk::ShaderStageFlags::ALL,
                             0,
                             bytemuck::bytes_of(&MipmapPipelinePushConstants {
-                                base_image_id: *reference as i32,
+                                base_image_id: *reference as u32,
                                 num_of_mips: info.image.get_mip_count(),
                             }),
                         );

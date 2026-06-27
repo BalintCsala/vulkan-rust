@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use ash::vk;
 use vk_mem::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, MemoryUsage};
@@ -228,6 +228,14 @@ impl Image {
             );
         };
         self.layout = new_layout;
+    }
+}
+
+impl Deref for Image {
+    type Target = vk::Image;
+
+    fn deref(&self) -> &Self::Target {
+        &self.handle
     }
 }
 

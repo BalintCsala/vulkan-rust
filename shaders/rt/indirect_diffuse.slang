@@ -7,7 +7,9 @@ import common;
 static uint MAX_PT_DEPTH = 5;
 
 struct PushConstants {
-    RTPushConstantsBase base;
+    uint64_t tlas;
+    ModelData *models;
+    InstanceData *instances;
     float4x4 viewProjectionInv;
     float3 cameraPosition;
     int gbufferId;
@@ -24,7 +26,7 @@ void rgen() {
     var gbuffer = getStorageImage<RWTexture2D<uint4>>(pushConstants.gbufferId);
     var directLightingOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.directLightingOutputId);
     var indirectDiffuseOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.indirectDiffuseOutputId);
-    var tlas = RaytracingAccelerationStructure(pushConstants.base.tlas);
+    var tlas = RaytracingAccelerationStructure(pushConstants.tlas);
 
     uint2 pixel = DispatchRaysIndex().xy;
     Random random = Random(pixel, DispatchRaysDimensions().xy, pushConstants.frame);

@@ -108,7 +108,7 @@ fn init_rendering(
     vulkan_state: Res<VulkanState>,
     mut resource_manager: ResMut<ResourceManager>,
 ) {
-    let scene_list = File::open("./assets/scene.txt").unwrap();
+    let scene_list = File::open("./assets/scene.txt").expect("Missing ./assets/scene.txt");
     let mut scene_files = Vec::new();
     for line in BufReader::new(scene_list).lines().map_while(Result::ok) {
         let gltf = Gltf::from_glb(
