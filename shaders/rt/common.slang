@@ -12,6 +12,6 @@ public struct RTPushConstantsBase {
 
 [raypayload] 
 public struct Payload {
-    public PackedMaterial material : read(caller) : write(closesthit);
+    public uint4 packedMaterial : read(caller) : write(closesthit);
     public float dist : read(caller) : write(caller, closesthit, anyhit, miss);
 }

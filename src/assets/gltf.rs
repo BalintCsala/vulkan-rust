@@ -41,7 +41,7 @@ pub enum Error {
     NoSceneNodes,
     MissingRequiredAttribute,
     InvalidAttribute,
-    ImageError,
+    ImageParsingFailed,
 }
 
 impl From<std::io::Error> for Error {
@@ -67,7 +67,7 @@ impl From<serde_json::Error> for Error {
 
 impl From<ImageError> for Error {
     fn from(_value: ImageError) -> Self {
-        Error::ImageError
+        Error::ImageParsingFailed
     }
 }
 
@@ -302,7 +302,7 @@ impl Gltf {
 
             let decoded_images = decoded_images.lock().unwrap();
 
-            let uploads = decoded_images
+            let mut uploads = decoded_images
                 .iter()
                 .enumerate()
                 .map(|(i, (texture_id, sampler_id, img))| {
@@ -343,9 +343,9 @@ impl Gltf {
                     );
                     (image_ref, img.iter().as_slice())
                 })
-                .collect::<Vec<_>>();
+                .collect();
 
-            resource_manager.upload_image_data(uploads.as_slice());
+            resource_manager.upload_image_data(&mut uploads);
             println!("Finished uploading images");
         }
 

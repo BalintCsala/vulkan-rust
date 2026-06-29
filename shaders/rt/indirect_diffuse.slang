@@ -12,6 +12,7 @@ struct PushConstants {
     InstanceData *instances;
     float4x4 viewProjectionInv;
     float3 cameraPosition;
+    int depthId;
     int gbufferId;
     int directLightingOutputId;
     int indirectDiffuseOutputId;
@@ -23,10 +24,11 @@ PushConstants pushConstants;
 
 [shader("raygeneration")]
 void rgen() {
-    var gbuffer = getStorageImage<RWTexture2D<uint4>>(pushConstants.gbufferId);
-    var directLightingOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.directLightingOutputId);
-    var indirectDiffuseOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.indirectDiffuseOutputId);
-    var tlas = RaytracingAccelerationStructure(pushConstants.tlas);
+    let depth = getSampledImage<Texture2D<uint4>>(pushConstants.gbufferId);
+    let gbuffer = getStorageImage<RWTexture2D<uint4>>(pushConstants.gbufferId);
+    let directLightingOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.directLightingOutputId);
+    let indirectDiffuseOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.indirectDiffuseOutputId);
+    let tlas = RaytracingAccelerationStructure(pushConstants.tlas);
 
     uint2 pixel = DispatchRaysIndex().xy;
     Random random = Random(pixel, DispatchRaysDimensions().xy, pushConstants.frame);
@@ -55,7 +57,7 @@ void rgen() {
             radiance += throughput * pow(float3(0.45, 0.61, 0.84), 2.2) * 0.05;
             break;
         }
-        Material material = payload.material.unpack();
+        Material material = Material.unpack(payload.packedMaterial);
         radiance += throughput * material.emissive;
 
         ray.Origin += ray.Direction * payload.dist;

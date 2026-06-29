@@ -62,8 +62,8 @@ pub fn generate_pipeline_code() -> String {
                 color_attachments: _,
                 depth_attachment: _,
             } => quote! {
-                pub fn #constructor_function_name(device: Arc<Device>, pipeline_layout: vk::PipelineLayout) -> GraphicsPipeline {
-                    GraphicsPipeline::new(#path.to_owned(), device, pipeline_layout)
+                pub fn #constructor_function_name(device: Arc<Device>, pipeline_layout: vk::PipelineLayout, surface_format: vk::Format) -> GraphicsPipeline {
+                    GraphicsPipeline::new(#path.to_owned(), device, pipeline_layout, surface_format)
                 }
             },
             pipeline_generator::types::ShaderInfo::Raytracing {

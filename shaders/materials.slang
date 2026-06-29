@@ -2,6 +2,7 @@ import lib.bindless;
 import lib.forward;
 import lib.barycentrics;
 import lib.packing;
+import lib.material;
 
 struct PushConstants {
     float4x4 viewProjection;
@@ -9,10 +10,7 @@ struct PushConstants {
     InstanceData *instances;
     float2 resolution;
     int visibilityBufferId;
-    int baseColorOutputId;
-    int normalOutputId;
-    int metallicRoughnessOutputId;
-    int emissiveOutputId;
+    int gbufferId;
 };
 
 [vk::push_constant]
@@ -28,16 +26,18 @@ void cs(uint2 gid: SV_DispatchThreadID) {
         return;
     }
 
-    var baseColorOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.baseColorOutputId);
-    var normalOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.normalOutputId);
-    var metallicRoughnessOutput = getStorageImage<RWTexture2D<float2>>(pushConstants.metallicRoughnessOutputId);
-    var emissiveOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.emissiveOutputId);
+    var gbuffer = getStorageImage<RWTexture2D<uint4>>(pushConstants.gbufferId);
 
     var instanceId = getInstanceIdFromUniqueId(uniqueId);
     var triangleId = getTriangleIdFromUniqueId(uniqueId);
 
     var instance = pushConstants.instances[instanceId];
     var model = pushConstants.models[instance.modelId];
+
+    var baseColorTexture = getSampledImage<Texture2D<float4>>(model.baseColorTextureId);
+    var normalTexture = getSampledImage<Texture2D<float4>>(model.normalTextureId);
+    var baseColorSampler = getSampler<SamplerState>(model.baseColorSamplerId);
+    var normalSampler = getSampler<SamplerState>(model.normalSamplerId);
 
     var index0 = model.indices[triangleId * 3 + 0];
     var index1 = model.indices[triangleId * 3 + 1];
@@ -55,35 +55,33 @@ void cs(uint2 gid: SV_DispatchThreadID) {
 
     Barycentrics barycentrics = Barycentrics.fromScreenPoints(clip0, clip1, clip2, ndc, pushConstants.resolution);
 
-    var baseColorTexture = getSampledImage<Texture2D<float4>>(model.baseColorTextureId);
-    var normalTexture = getSampledImage<Texture2D<float4>>(model.normalTextureId);
-
-    var baseColorSampler = getSampler<SamplerState>(model.baseColorSamplerId);
-    var normalSampler = getSampler<SamplerState>(model.normalSamplerId);
+    Material material;
 
     var fragmentData = model.getFragmentData(index0, index1, index2, position0, position1, position2, barycentrics);
     fragmentData.tbn = mul(instance.normalMatrix, fragmentData.tbn);
 
     var baseColorUV = fragmentData.uvs[model.baseColorTexcoordId];
-    baseColorOutput[gid] =
-        baseColorTexture.SampleGrad(baseColorSampler, baseColorUV.value, baseColorUV.ddx, baseColorUV.ddy);
+    material.baseColor =
+        baseColorTexture.SampleGrad(baseColorSampler, baseColorUV.value, baseColorUV.ddx, baseColorUV.ddy).rgb;
 
     var normalUV = fragmentData.uvs[model.normalTexcoordId];
-    var normal = normalTexture.SampleGrad(normalSampler, normalUV.value, normalUV.ddx, normalUV.ddy).xyz * 2.0 - 1.0;
-    normal = normalize(mul(normal, fragmentData.tbn));
-    normalOutput[gid] = float4(octahedron::encode(normalize(fragmentData.tbn[2])), octahedron::encode(normal));
+    material.normal = normalTexture.SampleGrad(normalSampler, normalUV.value, normalUV.ddx, normalUV.ddy).xyz * 2.0 - 1.0;
+    material.normal = normalize(mul(material.normal, fragmentData.tbn));
 
     if (model.metallicRoughnessTextureId >= 0) {
         var metallicRoughnessTexture = getSampledImage<Texture2D<float4>>(model.metallicRoughnessTextureId);
         var metallicRoughnessSampler = getSampler<SamplerState>(model.metallicRoughnessSamplerId);
         var metallicRoughnessUV = fragmentData.uvs[model.metallicRoughnessTexcoordId];
-        metallicRoughnessOutput[gid] =
+        float2 metallicRoughness = 
             metallicRoughnessTexture
                 .SampleGrad(
                     metallicRoughnessSampler, metallicRoughnessUV.value, metallicRoughnessUV.ddx, metallicRoughnessUV.ddy)
                 .bg;
+        material.metallic = metallicRoughness.x;
+        material.roughness = metallicRoughness.y;
     } else {
-        metallicRoughnessOutput[gid] = float2(1.0, 1.0);
+        material.metallic = 1.0;
+        material.roughness = 1.0;
     }
 
     if (model.emissiveTextureId >= 0) {
@@ -91,13 +89,14 @@ void cs(uint2 gid: SV_DispatchThreadID) {
         var emissiveTexture = getSampledImage<Texture2D<float4>>(model.emissiveTextureId);
         var emissiveSampler = getSampler<SamplerState>(model.emissiveSamplerId);
 
-        emissiveOutput[gid] =
-            float4(emissiveTexture.SampleGrad(emissiveSampler, emissiveUV.value, emissiveUV.ddx, emissiveUV.ddy).xyz *
-                       model.emissiveFactor,
-                   1.0);
+        material.emissive =
+            emissiveTexture.SampleGrad(emissiveSampler, emissiveUV.value, emissiveUV.ddx, emissiveUV.ddy).xyz *
+                       model.emissiveFactor;
     } else {
-        emissiveOutput[gid] = float4(model.emissiveFactor, 1.0);
+        material.emissive = model.emissiveFactor;
     }
+
+    gbuffer[gid] = material.pack();
 }
 
 

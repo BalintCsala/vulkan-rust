@@ -29,10 +29,7 @@ pub(crate) fn compile_shader(path: &str) -> ShaderData {
 
     let out_path = spv_folder.join(file_name).with_extension("spv");
 
-    let temp_folder = std::env::var("OUT_DIR").unwrap();
-    let reflection_path = PathBuf::from(temp_folder)
-        .join(file_name)
-        .with_extension("json");
+    let reflection_path = std::env::temp_dir().join(file_name).with_extension("json");
 
     Command::new("slangc")
         .arg(path)

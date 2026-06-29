@@ -58,7 +58,7 @@ void chit(inout Payload payload, BuiltInTriangleIntersectionAttributes attr) {
         material.emissive = model.emissiveFactor;
     }
 
-    payload.material = material.pack();
+    payload.packedMaterial = material.pack();
     payload.dist = RayTCurrent();
 }
 

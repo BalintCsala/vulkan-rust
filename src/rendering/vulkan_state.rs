@@ -11,8 +11,6 @@ use bevy::ecs::resource::Resource;
 use vk_mem::{AllocatorCreateFlags, AllocatorCreateInfo};
 use winit::raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
-use crate::rendering::command_cache::CommandCache;
-
 use vulkan_utils::{
     complex_types::image::Image,
     utility_functions::assign_debug_name,
@@ -23,24 +21,13 @@ const FRAMES_IN_FLIGHT: usize = 3;
 
 struct FrameData {
     device: Arc<Device>,
-    fence: vk::Fence,
-    command_cache: CommandCache,
+    command_buffer: vk::CommandBuffer,
     image_acquired: vk::Semaphore,
     deletion_queue: Vec<Box<dyn Send + Sync>>,
 }
 
 impl FrameData {
-    pub fn new(device: Arc<Device>, frame_id: usize) -> Self {
-        let fence = unsafe {
-            device
-                .create_fence(
-                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
-                    None,
-                )
-                .unwrap()
-        };
-        assign_debug_name(&device, fence, &format!("Frame fence #{}", frame_id));
-
+    pub fn new(device: Arc<Device>, frame_id: usize, command_pool: vk::CommandPool) -> Self {
         let image_acquired = unsafe {
             device
                 .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
@@ -52,13 +39,20 @@ impl FrameData {
             &format!("Image acquired semaphore #{}", frame_id),
         );
 
-        let command_cache = CommandCache::new(device.clone());
+        let command_buffer = unsafe {
+            device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(command_pool)
+                        .command_buffer_count(1),
+                )
+                .unwrap()[0]
+        };
 
         Self {
             device,
-            fence,
             image_acquired,
-            command_cache,
+            command_buffer,
             deletion_queue: Vec::new(),
         }
     }
@@ -66,9 +60,6 @@ impl FrameData {
 
 impl Drop for FrameData {
     fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_fence(self.fence, None);
-        };
         unsafe {
             self.device.destroy_semaphore(self.image_acquired, None);
         };
@@ -88,6 +79,8 @@ pub struct VulkanState {
     pub device: Arc<Device>,
     pub queue: vk::Queue,
 
+    command_pool: vk::CommandPool,
+
     surface_instance: surface::Instance,
     surface: vk::SurfaceKHR,
     pub surface_format: vk::SurfaceFormatKHR,
@@ -102,6 +95,8 @@ pub struct VulkanState {
 
     frames: Vec<FrameData>,
     frame_id: usize,
+
+    frame_semaphore: vk::Semaphore,
 
     pub allocator: Arc<Allocator>,
 }
@@ -190,7 +185,8 @@ impl VulkanState {
                         vk::PhysicalDeviceFeatures::default()
                             .shader_int16(true)
                             .shader_int64(true)
-                            .geometry_shader(true),
+                            .geometry_shader(true)
+                            .fragment_stores_and_atomics(true),
                     ),
                 )
                 .push_next(
@@ -207,7 +203,8 @@ impl VulkanState {
                         .descriptor_binding_sampled_image_update_after_bind(true)
                         .descriptor_binding_storage_image_update_after_bind(true)
                         .shader_int8(true)
-                        .scalar_block_layout(true),
+                        .scalar_block_layout(true)
+                        .timeline_semaphore(true),
                 )
                 .push_next(
                     &mut vk::PhysicalDeviceVulkan13Features::default()
@@ -232,6 +229,16 @@ impl VulkanState {
             )
         };
 
+        let command_pool = unsafe {
+            device
+                .create_command_pool(
+                    &vk::CommandPoolCreateInfo::default()
+                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+                    None,
+                )
+                .unwrap()
+        };
+
         let allocator = {
             let mut create_info = AllocatorCreateInfo::new(&instance, &device, physical_device);
             create_info.flags = AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
@@ -242,16 +249,30 @@ impl VulkanState {
         let swapchain_device = swapchain::Device::new(&instance, &device);
 
         let frames = (0..FRAMES_IN_FLIGHT)
-            .map(|frame_id| FrameData::new(device.clone(), frame_id))
+            .map(|frame_id| FrameData::new(device.clone(), frame_id, command_pool))
             .collect();
 
         let extent = vk::Extent2D::default().width(width).height(height);
+
+        let frame_semaphore = unsafe {
+            device
+                .create_semaphore(
+                    &vk::SemaphoreCreateInfo::default().push_next(
+                        &mut vk::SemaphoreTypeCreateInfo::default()
+                            .semaphore_type(vk::SemaphoreType::TIMELINE)
+                            .initial_value(FRAMES_IN_FLIGHT as u64 - 1),
+                    ),
+                    None,
+                )
+                .unwrap()
+        };
 
         Self {
             _entry: entry,
             instance,
             physical_device,
             device,
+            command_pool,
 
             surface_instance,
             surface,
@@ -267,6 +288,7 @@ impl VulkanState {
             present_mode,
             surface_format,
             min_image_count,
+            frame_semaphore,
         }
     }
 
@@ -357,7 +379,9 @@ impl VulkanState {
     }
 
     pub fn queue_object_for_deletion(&mut self, obj: Box<dyn Send + Sync>) {
-        self.frames[self.frame_id].deletion_queue.push(obj);
+        self.frames[self.frame_id % FRAMES_IN_FLIGHT]
+            .deletion_queue
+            .push(obj);
     }
 
     pub fn current_image(&mut self) -> &mut Image {
@@ -367,10 +391,8 @@ impl VulkanState {
         }
     }
 
-    pub fn get_command_buffer(&mut self) -> vk::CommandBuffer {
-        self.frames[self.frame_id]
-            .command_cache
-            .get_command_buffer()
+    pub fn get_command_buffer(&self) -> vk::CommandBuffer {
+        self.frames[self.frame_id % FRAMES_IN_FLIGHT].command_buffer
     }
 
     pub fn start_frame(&mut self, width: u32, height: u32) -> bool {
@@ -379,17 +401,23 @@ impl VulkanState {
             self.create_swapchain();
         }
         let swapchain = self.swapchain.unwrap();
+
         unsafe {
             self.device
-                .wait_for_fences(&[self.frames[self.frame_id].fence], true, u64::MAX)
-                .unwrap();
-        }
+                .wait_semaphores(
+                    &vk::SemaphoreWaitInfo::default()
+                        .semaphores(&[self.frame_semaphore])
+                        .values(&[self.frame_id as u64]),
+                    u64::MAX,
+                )
+                .unwrap()
+        };
 
         let (image_id, _) = unsafe {
             match self.swapchain_device.acquire_next_image(
                 swapchain,
                 u64::MAX,
-                self.frames[self.frame_id].image_acquired,
+                self.frames[self.frame_id % FRAMES_IN_FLIGHT].image_acquired,
                 vk::Fence::null(),
             ) {
                 Ok(result) => result,
@@ -402,33 +430,54 @@ impl VulkanState {
 
         unsafe {
             self.device
-                .reset_fences(&[self.frames[self.frame_id].fence])
+                .reset_command_buffer(
+                    self.get_command_buffer(),
+                    vk::CommandBufferResetFlags::empty(),
+                )
                 .unwrap();
         };
 
-        self.frames[self.frame_id].command_cache.reset();
+        unsafe {
+            self.device
+                .begin_command_buffer(
+                    self.get_command_buffer(),
+                    &vk::CommandBufferBeginInfo::default(),
+                )
+                .unwrap();
+        };
 
         self.image_id = Some(image_id);
         true
     }
 
-    pub fn end_frame(&mut self, command_buffer: vk::CommandBuffer) {
+    pub fn end_frame(&mut self) {
         let image_id = self.image_id.expect("Frame was not started yet");
 
         unsafe {
-            self.device.end_command_buffer(command_buffer).unwrap();
+            self.device
+                .end_command_buffer(self.get_command_buffer())
+                .unwrap();
         };
 
         unsafe {
             self.device
-                .queue_submit(
+                .queue_submit2(
                     self.queue,
-                    &[vk::SubmitInfo::default()
-                        .command_buffers(&[command_buffer])
-                        .wait_semaphores(&[self.frames[self.frame_id].image_acquired])
-                        .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
-                        .signal_semaphores(&[self.images[image_id as usize].rendering_finished])],
-                    self.frames[self.frame_id].fence,
+                    &[vk::SubmitInfo2::default()
+                        .command_buffer_infos(&[vk::CommandBufferSubmitInfo::default()
+                            .command_buffer(self.get_command_buffer())])
+                        .wait_semaphore_infos(&[vk::SemaphoreSubmitInfo::default()
+                            .semaphore(self.frames[self.frame_id % FRAMES_IN_FLIGHT].image_acquired)
+                            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)])
+                        .signal_semaphore_infos(&[
+                            vk::SemaphoreSubmitInfo::default()
+                                .semaphore(self.images[image_id as usize].rendering_finished)
+                                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+                            vk::SemaphoreSubmitInfo::default()
+                                .semaphore(self.frame_semaphore)
+                                .value((self.frame_id + FRAMES_IN_FLIGHT) as u64),
+                        ])],
+                    vk::Fence::null(),
                 )
                 .unwrap();
         };
@@ -447,10 +496,12 @@ impl VulkanState {
             }
         };
 
-        self.frame_id = (self.frame_id + 1) % FRAMES_IN_FLIGHT;
+        self.frame_id += 1;
         self.image_id = None;
 
-        self.frames[self.frame_id].deletion_queue.clear();
+        self.frames[self.frame_id % FRAMES_IN_FLIGHT]
+            .deletion_queue
+            .clear();
     }
 }
 
@@ -466,6 +517,12 @@ impl Drop for VulkanState {
             self.device
                 .destroy_semaphore(image_data.rendering_finished, None);
         });
+        unsafe {
+            self.device.destroy_semaphore(self.frame_semaphore, None);
+        };
+        unsafe {
+            self.device.destroy_command_pool(self.command_pool, None);
+        }
 
         if let Some(swapchain) = self.swapchain {
             unsafe {

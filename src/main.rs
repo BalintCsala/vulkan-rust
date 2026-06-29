@@ -73,7 +73,7 @@ fn main() {
             WindowPlugin {
                 primary_window: Some(Window {
                     title: "Vulkan Rust".into(),
-                    resolution: WindowResolution::new(1024, 768),
+                    resolution: WindowResolution::new(1920, 1080),
                     visible: true,
                     present_mode: bevy::window::PresentMode::Immediate,
                     ..Default::default()

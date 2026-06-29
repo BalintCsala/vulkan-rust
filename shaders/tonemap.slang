@@ -5,15 +5,35 @@ struct PushConstants {
     int gbufferId;
     int directLightingOutputId;
     int indirectDiffuseOutputId;
-    int outputId;
 }
+
+struct VertexOut {
+    float4 position : SV_Position;
+};
 
 [vk::push_constant]
 PushConstants pushConstants;
 
-[shader("compute")]
-[numthreads(8, 8)]
-void cs(uint2 pixel: SV_DispatchThreadID) {
+[shader("vertex")]
+VertexOut vs(uint index : SV_VertexID) {
+    VertexOut o;
+    switch (index) {
+        case 0:
+            o.position = float4(-1.0, -1.0, 0.0, 1.0);
+            break;
+        case 1:
+            o.position = float4(-1.0, 3.0, 0.0, 1.0);
+            break;
+        case 2:
+            o.position = float4(3.0, -1.0, 0.0, 1.0);
+            break;
+    }
+    return o;
+}
+
+[shader("fragment")]
+float4 fs(VertexOut i) {
+    uint2 pixel = uint2(i.position.xy);
     var gbuffer = getStorageImage<RWTexture2D<uint4>>(pushConstants.gbufferId);
     var directLightingOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.directLightingOutputId);
     var indirectDiffuseOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.indirectDiffuseOutputId);
@@ -27,9 +47,5 @@ void cs(uint2 pixel: SV_DispatchThreadID) {
         radiance = directLightingOutput[pixel].rgb + indirectDiffuseOutput[pixel / 2].rgb;
     }
 
-    var outputImage = getStorageImage<RWTexture2D<float4>>(pushConstants.outputId);
-    outputImage[pixel] = float4(tonemap(radiance * 5.0), 1.0);
+    return float4(tonemap(radiance * 5.0), 1.0);
 }
-
-
-

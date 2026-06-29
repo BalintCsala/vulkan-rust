@@ -12,6 +12,7 @@ struct PushConstants {
     InstanceData *instances;
     float4x4 viewProjectionInv;
     float3 cameraPosition;
+    int depthTextureId;
     int gbufferId;
     int directLightingOutputId;
     uint frame;
@@ -26,36 +27,31 @@ static float3 LIGHT_DIR = normalize(float3(1,3,2));
 void rgen() {
     var gbuffer = getStorageImage<RWTexture2D<uint4>>(pushConstants.gbufferId);
     var directLightingOutput = getStorageImage<RWTexture2D<float4>>(pushConstants.directLightingOutputId);
+    var depthTexture = getSampledImage<Texture2D<float>>(pushConstants.depthTextureId);
+
     var tlas = RaytracingAccelerationStructure(pushConstants.tlas);
 
     uint2 pixel = DispatchRaysIndex().xy;
     Random random = Random(pixel, DispatchRaysDimensions().xy, pushConstants.frame);
 
-    float2 screenPos = (float2(pixel) + 0.5) / DispatchRaysDimensions().xy;
-    float4 temp = mul(pushConstants.viewProjectionInv, float4(screenPos * 2.0 - 1.0, 1.0, 1.0));
-    float3 worldPos = temp.xyz / temp.w;
-
-    float3 rayDir = normalize(worldPos - pushConstants.cameraPosition);
-
-    RayDesc ray;
-    ray.Origin = pushConstants.cameraPosition;
-    ray.Direction = rayDir;
-    ray.TMin = 0.01;
-    ray.TMax = 256.0;
-    
-    Payload directPayload;
-    TraceRay(tlas, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, directPayload);
-    if (directPayload.dist < 0) {
-        gbuffer[pixel] = 0u;
+    float depth = depthTexture[pixel];
+    if (depth == 1.0) {
+        directLightingOutput[pixel] = 0.0;
         return;
     }
 
-    gbuffer[pixel] = directPayload.material.toRaw();
-    Material material = directPayload.material.unpack();
+    float2 screenPos = (float2(pixel) + 0.5) / DispatchRaysDimensions().xy;
+    float4 temp = mul(pushConstants.viewProjectionInv, float4(screenPos * 2.0 - 1.0, depth, 1.0));
+    float3 worldPos = temp.xyz / temp.w;
+
+    Material material = Material.unpack(gbuffer[pixel]);
 
     Payload sunPayload;
-    ray.Origin += ray.Direction * directPayload.dist;
+    RayDesc ray;
+    ray.Origin = worldPos;
     ray.Direction = LIGHT_DIR;
+    ray.TMin = 0.01;
+    ray.TMax = 256.0;
     TraceRay(
         tlas, 
         RAY_FLAG_CULL_BACK_FACING_TRIANGLES | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 
@@ -67,10 +63,11 @@ void rgen() {
 
     float3 radiance = material.emissive;
     if (sunPayload.dist < 0) {
-        radiance += material.brdf(-rayDir, LIGHT_DIR) * 1.0;
+        float3 view = normalize(pushConstants.cameraPosition - worldPos);
+        radiance += material.brdf(view, LIGHT_DIR) * 1.0;
     }
 
-    directLightingOutput[pixel] = float4(radiance, directPayload.dist);
+    directLightingOutput[pixel] = float4(radiance, 1.0);
 }
 
 [shader("miss")]

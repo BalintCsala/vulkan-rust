@@ -5,18 +5,22 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum ColorAttachment {
     #[serde(rename = "r32ui")]
     R32UI,
+    #[serde(rename = "surface")]
+    Surface,
 }
 
 impl ColorAttachment {
     pub(crate) fn to_write_mask(&self) -> vk::ColorComponentFlags {
         match self {
             ColorAttachment::R32UI => vk::ColorComponentFlags::R,
+            ColorAttachment::Surface => vk::ColorComponentFlags::RGBA,
         }
     }
 
-    pub(crate) fn to_format(&self) -> vk::Format {
+    pub(crate) fn to_format(&self, surface_format: vk::Format) -> vk::Format {
         match self {
             ColorAttachment::R32UI => vk::Format::R32_UINT,
+            ColorAttachment::Surface => surface_format,
         }
     }
 }

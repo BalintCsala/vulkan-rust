@@ -40,7 +40,7 @@ void rgen() {
             radiance += throughput * pow(float3(0.45, 0.61, 0.84), 2.2) * 0.05;
             break;
         }
-        Material material = payload.material.unpack();
+        Material material = Material.unpack(payload.packedMaterial);
         radiance += throughput * material.emissive;
 
         ray.Origin += ray.Direction * payload.dist;

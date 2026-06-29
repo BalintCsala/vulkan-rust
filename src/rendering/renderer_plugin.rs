@@ -12,7 +12,6 @@ use bevy::{
         system::{Commands, Query, Res, ResMut, Single},
     },
     input::{ButtonInput, keyboard::KeyCode},
-    math::Vec3,
     transform::components::{GlobalTransform, Transform},
     window::{RawHandleWrapperHolder, Window},
 };
@@ -28,17 +27,20 @@ use crate::{
     rendering::{
         components::camera::Camera,
         generated_pipelines::{
-            DirectLightingPipelinePushConstants, TonemapPipelinePushConstants,
+            DirectLightingPipelinePushConstants, MaterialsPipelinePushConstants,
+            TonemapPipelinePushConstants, VisibilityPipelinePushConstants,
             create_direct_lighting_pipeline, create_materials_pipeline, create_tonemap_pipeline,
             create_visibility_pipeline,
         },
-        resource_manager::{ImageReference, ImageSize, ResourceManager},
+        resource_manager::{ImageReference, ImageSize, InstanceReference, ResourceManager},
         vulkan_state::VulkanState,
     },
 };
 
 #[derive(Component)]
-struct Renderable;
+struct Renderable {
+    instance_ref: InstanceReference,
+}
 
 #[derive(Resource)]
 struct RendererState {
@@ -46,14 +48,13 @@ struct RendererState {
     visibility_pipeline: GraphicsPipeline,
     materials_pipeline: ComputePipeline,
     direct_lighting_pipeline: RaytracingPipeline,
-    tonemap_pipeline: ComputePipeline,
+    tonemap_pipeline: GraphicsPipeline,
 
     depth: ImageReference,
     visibility: ImageReference,
     gbuffer: ImageReference,
     direct_lighting: ImageReference,
     indirect_diffuse: ImageReference,
-    output: ImageReference,
 
     frame: u32,
 }
@@ -112,6 +113,7 @@ fn create_render_resources(
     let visibility_pipeline = create_visibility_pipeline(
         vulkan_state.device.clone(),
         resource_manager.bindless_pipeline_layout,
+        vulkan_state.surface_format.format,
     );
 
     let materials_pipeline = create_materials_pipeline(
@@ -122,6 +124,7 @@ fn create_render_resources(
     let tonemap_pipeline = create_tonemap_pipeline(
         vulkan_state.device.clone(),
         resource_manager.bindless_pipeline_layout,
+        vulkan_state.surface_format.format,
     );
 
     commands.insert_resource(RendererState {
@@ -172,20 +175,12 @@ fn create_render_resources(
             vk::ImageUsageFlags::STORAGE,
             1,
             1,
-            "Direct lighting".to_owned(),
-        ),
-
-        output: resource_manager.create_empty_image(
-            ImageSize::Scaled(1.0, 1.0),
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
-            1,
-            1,
-            "Output".to_owned(),
+            "Indirect diffuse".to_owned(),
         ),
 
         frame: 0,
     });
+
     commands.insert_resource(resource_manager);
     commands.insert_resource(vulkan_state);
 }
@@ -228,8 +223,9 @@ fn on_new_renderables(
     mut resource_manager: ResMut<ResourceManager>,
 ) {
     for (entity, transform, model) in renderables {
-        resource_manager.create_instance(&transform.to_matrix(), &model.model_ref);
-        commands.entity(entity).insert(Renderable);
+        let instance_ref =
+            resource_manager.create_instance(&transform.to_matrix(), &model.model_ref);
+        commands.entity(entity).insert(Renderable { instance_ref });
     }
 
     resource_manager.build_acceleration_structures(&vulkan_state.device);
@@ -238,6 +234,7 @@ fn on_new_renderables(
 fn render(
     mut vulkan_state: ResMut<VulkanState>,
     renderer_state: Res<RendererState>,
+    renderables: Query<(&Model, &Renderable)>,
     mut resource_manager: ResMut<ResourceManager>,
     camera: Single<(&Transform, &Camera)>,
     window: Single<&Window>,
@@ -255,9 +252,8 @@ fn render(
     }
 
     let (camera_transform, camera_data) = *camera;
-    let sun_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
+    // let sun_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
 
-    let command_buffer = vulkan_state.get_command_buffer();
     let view_projection = camera_data
         .projection_matrix(vulkan_state.extent.width, vulkan_state.extent.height)
         * camera_transform.to_matrix().inverse();
@@ -286,30 +282,167 @@ fn render(
     unsafe {
         device.cmd_pipeline_barrier2(
             command_buffer,
-            &vk::DependencyInfo::default().image_memory_barriers(&[
-                resource_manager
-                    .get_image_mut(&renderer_state.depth)
-                    .get_transition_barrier(
-                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                    ),
-                resource_manager
-                    .get_image_mut(&renderer_state.direct_lighting)
-                    .get_transition_barrier(
-                        vk::PipelineStageFlags2::NONE,
-                        vk::AccessFlags2::NONE,
-                        vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR,
-                        vk::AccessFlags2::SHADER_WRITE,
-                        vk::ImageLayout::GENERAL,
-                    ),
-            ]),
+            &vk::DependencyInfo::default()
+                .memory_barriers(&[
+                    vk::MemoryBarrier2::default()
+                        .src_stage_mask(
+                            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                        )
+                        .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                        .dst_stage_mask(
+                            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                        )
+                        .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE),
+                    vk::MemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .src_access_mask(vk::AccessFlags2::NONE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR)
+                        .dst_access_mask(vk::AccessFlags2::SHADER_WRITE),
+                ])
+                .image_memory_barriers(&[vulkan_state.current_image().get_transition_barrier(
+                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags2::NONE,
+                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    vk::ImageLayout::GENERAL,
+                )]),
         );
     }
+
+    // Visibility
+    renderer_state.visibility_pipeline.bind(command_buffer);
+
+    unsafe {
+        device.cmd_set_viewport(
+            command_buffer,
+            0,
+            &[vk::Viewport::default()
+                .x(0.0)
+                .y(0.0)
+                .width(vulkan_state.extent.width as f32)
+                .height(vulkan_state.extent.height as f32)
+                .min_depth(0.0)
+                .max_depth(1.0)],
+        );
+    };
+
+    unsafe {
+        device.cmd_set_scissor(
+            command_buffer,
+            0,
+            &[vk::Rect2D::default()
+                .offset(vk::Offset2D { x: 0, y: 0 })
+                .extent(vulkan_state.extent)],
+        );
+    }
+
+    unsafe {
+        device.cmd_begin_rendering(
+            command_buffer,
+            &vk::RenderingInfo::default()
+                .layer_count(1)
+                .render_area(
+                    vk::Rect2D::default()
+                        .offset(vk::Offset2D { x: 0, y: 0 })
+                        .extent(vulkan_state.extent),
+                )
+                .color_attachments(&[vk::RenderingAttachmentInfo::default()
+                    .image_view(resource_manager.get_image(&renderer_state.visibility).view)
+                    .image_layout(vk::ImageLayout::GENERAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            uint32: [0, 0, 0, 0],
+                        },
+                    })])
+                .depth_attachment(
+                    &vk::RenderingAttachmentInfo::default()
+                        .image_view(resource_manager.get_image(&renderer_state.depth).view)
+                        .image_layout(vk::ImageLayout::GENERAL)
+                        .load_op(vk::AttachmentLoadOp::CLEAR)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(vk::ClearValue {
+                            depth_stencil: vk::ClearDepthStencilValue::default().depth(1.0),
+                        }),
+                ),
+        );
+    };
+
+    let mut visibility_push_constants = VisibilityPipelinePushConstants {
+        view_projection: [0.0; 16],
+        models: resource_manager.model_buffer.address,
+        instance_data: resource_manager.instance_buffer.address,
+    };
+    view_projection.write_cols_to_slice(visibility_push_constants.view_projection.as_mut_slice());
+    unsafe {
+        device.cmd_push_constants(
+            command_buffer,
+            resource_manager.bindless_pipeline_layout,
+            vk::ShaderStageFlags::ALL,
+            0,
+            bytemuck::bytes_of(&visibility_push_constants),
+        );
+    };
+
+    for (model, renderable) in renderables {
+        let index_data = resource_manager.get_index_data(model.model_ref);
+        unsafe {
+            device.cmd_bind_index_buffer(
+                command_buffer,
+                index_data.index_buffer.handle,
+                0,
+                vk::IndexType::UINT32,
+            );
+        }
+        renderer_state.visibility_pipeline.draw_indexed(
+            command_buffer,
+            index_data.index_count,
+            1,
+            0,
+            0,
+            renderable.instance_ref as u32,
+        );
+    }
+
+    unsafe {
+        device.cmd_end_rendering(command_buffer);
+    };
+
+    // Materials
+    renderer_state.materials_pipeline.bind(command_buffer);
+
+    let mut materials_push_constants = MaterialsPipelinePushConstants {
+        view_projection: [0.0; 16],
+        models: resource_manager.model_buffer.address,
+        instances: resource_manager.instance_buffer.address,
+        resolution: [
+            vulkan_state.extent.width as f32,
+            vulkan_state.extent.height as f32,
+        ],
+        visibility_buffer_id: renderer_state.visibility.into(),
+        gbuffer_id: renderer_state.gbuffer.into(),
+    };
+    view_projection.write_cols_to_slice(materials_push_constants.view_projection.as_mut_slice());
+
+    unsafe {
+        device.cmd_push_constants(
+            command_buffer,
+            resource_manager.bindless_pipeline_layout,
+            vk::ShaderStageFlags::ALL,
+            0,
+            bytemuck::bytes_of(&materials_push_constants),
+        );
+    };
+
+    renderer_state.materials_pipeline.dispatch(
+        command_buffer,
+        vulkan_state.extent.width.div_ceil(8),
+        vulkan_state.extent.height.div_ceil(8),
+        1,
+    );
 
     // Path tracing
     renderer_state.direct_lighting_pipeline.bind(command_buffer);
@@ -326,9 +459,11 @@ fn render(
         instances: resource_manager.instance_buffer.address,
         view_projection_inv: [0.0; 16],
         camera_position: [0.0; 3],
+        depth_texture_id: renderer_state.depth.into(),
         gbuffer_id: renderer_state.gbuffer.into(),
         direct_lighting_output_id: renderer_state.direct_lighting.into(),
         frame: renderer_state.frame,
+        _pad0: 0,
     };
 
     view_projection
@@ -357,36 +492,51 @@ fn render(
     unsafe {
         device.cmd_pipeline_barrier2(
             command_buffer,
-            &vk::DependencyInfo::default().image_memory_barriers(&[
-                resource_manager
-                    .get_image_mut(&renderer_state.direct_lighting)
-                    .get_transition_barrier(
-                        vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR,
-                        vk::AccessFlags2::SHADER_WRITE,
-                        vk::PipelineStageFlags2::COMPUTE_SHADER,
-                        vk::AccessFlags2::SHADER_READ,
-                        vk::ImageLayout::GENERAL,
-                    ),
-                resource_manager
-                    .get_image_mut(&renderer_state.output)
-                    .get_transition_barrier(
-                        vk::PipelineStageFlags2::BLIT,
-                        vk::AccessFlags2::NONE,
-                        vk::PipelineStageFlags2::COMPUTE_SHADER,
-                        vk::AccessFlags2::SHADER_WRITE,
-                        vk::ImageLayout::GENERAL,
-                    ),
+            &vk::DependencyInfo::default().memory_barriers(&[
+                vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR)
+                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ),
+                vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::NONE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE),
             ]),
         );
     };
 
     // Tonemapping
     renderer_state.tonemap_pipeline.bind(command_buffer);
+
+    unsafe {
+        device.cmd_begin_rendering(
+            command_buffer,
+            &vk::RenderingInfo::default()
+                .layer_count(1)
+                .render_area(
+                    vk::Rect2D::default()
+                        .offset(vk::Offset2D { x: 0, y: 0 })
+                        .extent(vulkan_state.extent),
+                )
+                .color_attachments(&[vk::RenderingAttachmentInfo::default()
+                    .image_view(vulkan_state.current_image().view)
+                    .image_layout(vk::ImageLayout::GENERAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 1.0],
+                        },
+                    })]),
+        );
+    };
+
     let tonemap_push_constants = TonemapPipelinePushConstants {
         gbuffer_id: renderer_state.gbuffer.into(),
         direct_lighting_output_id: renderer_state.direct_lighting.into(),
         indirect_diffuse_output_id: renderer_state.indirect_diffuse.into(),
-        output_id: renderer_state.output.into(),
     };
     unsafe {
         device.cmd_push_constants(
@@ -397,76 +547,14 @@ fn render(
             bytemuck::bytes_of(&tonemap_push_constants),
         );
     }
+
     renderer_state
         .tonemap_pipeline
-        .dispatch(command_buffer, width / 8, height / 8, 1);
+        .draw(command_buffer, 3, 1, 0, 0);
 
     unsafe {
-        device.cmd_pipeline_barrier2(
-            command_buffer,
-            &vk::DependencyInfo::default().image_memory_barriers(&[
-                resource_manager
-                    .get_image_mut(&renderer_state.output)
-                    .get_transition_barrier(
-                        vk::PipelineStageFlags2::COMPUTE_SHADER,
-                        vk::AccessFlags2::SHADER_WRITE,
-                        vk::PipelineStageFlags2::BLIT,
-                        vk::AccessFlags2::TRANSFER_READ,
-                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    ),
-                vulkan_state.current_image().get_transition_barrier(
-                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                    vk::AccessFlags2::NONE,
-                    vk::PipelineStageFlags2::BLIT,
-                    vk::AccessFlags2::TRANSFER_WRITE,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                ),
-            ]),
-        );
+        device.cmd_end_rendering(command_buffer);
     };
-
-    let source_image = resource_manager.get_image(&renderer_state.output);
-    unsafe {
-        device.cmd_blit_image(
-            command_buffer,
-            source_image.handle,
-            source_image.layout,
-            vulkan_state.current_image().handle,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &[vk::ImageBlit::default()
-                .src_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                )
-                .src_offsets([
-                    vk::Offset3D { x: 0, y: 0, z: 0 },
-                    vk::Offset3D {
-                        x: vulkan_state.extent.width as i32,
-                        y: vulkan_state.extent.height as i32,
-                        z: 1,
-                    },
-                ])
-                .dst_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                )
-                .dst_offsets([
-                    vk::Offset3D { x: 0, y: 0, z: 0 },
-                    vk::Offset3D {
-                        x: vulkan_state.extent.width as i32,
-                        y: vulkan_state.extent.height as i32,
-                        z: 1,
-                    },
-                ])],
-            vk::Filter::NEAREST,
-        );
-    }
 
     unsafe {
         device.cmd_pipeline_barrier2(
@@ -474,16 +562,16 @@ fn render(
             &vk::DependencyInfo::default().image_memory_barriers(&[vulkan_state
                 .current_image()
                 .get_transition_barrier(
-                    vk::PipelineStageFlags2::BLIT,
-                    vk::AccessFlags2::TRANSFER_WRITE,
-                    vk::PipelineStageFlags2::NONE,
+                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                     vk::AccessFlags2::NONE,
                     vk::ImageLayout::PRESENT_SRC_KHR,
                 )]),
         );
     };
 
-    vulkan_state.end_frame(command_buffer);
+    vulkan_state.end_frame();
 }
 
 impl Drop for RendererState {

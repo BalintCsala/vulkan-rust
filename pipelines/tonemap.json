@@ -2,25 +2,9 @@
   "structName": "TonemapPipeline",
   "shaderPath": "shaders/tonemap.slang",
   "shaderInfo": {
-    "type": "compute",
-    "entry": "cs"
-  },
-  "inputs": [
-    {
-      "type": "storageImage",
-      "name": "gbuffer"
-    },
-    {
-      "type": "storageImage",
-      "name": "direct_lighting_output"
-    },
-    {
-      "type": "storageImage",
-      "name": "indirect_diffuse_output"
-    },
-    {
-      "type": "storageImage",
-      "name": "output"
-    }
-  ]
+    "type": "graphics",
+    "vertex": "vs",
+    "fragment": "fs",
+    "colorAttachments": ["surface"]
+  }
 }

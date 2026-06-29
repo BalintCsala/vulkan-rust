@@ -50,50 +50,23 @@ public struct Material {
         return normalize(normal + directionOffset);
     }
 
-    public PackedMaterial pack() {
-        PackedMaterial packed;
-
-        packed.baseColor = packUnorm4x8(float4(pow(baseColor, 1.0 / 2.2), 1.0));
-        packed.metallicRoughness = packUnorm4x8(float4(metallic, roughness, 0.0, 0.0));
-        packed.normal = packUnorm2x16(octahedron::encode(normal));
-        packed.emissive = packHDR(emissive);
-
+    public uint4 pack() {
+        uint4 packed;
+        packed.x = packUnorm4x8(float4(pow(baseColor, 1.0 / 2.2), 1.0));
+        packed.y = packUnorm4x8(float4(metallic, roughness, 0.0, 0.0));
+        packed.z = packUnorm2x16(octahedron::encode(normal));
+        packed.w = packHDR(emissive);
         return packed;
     }
-}
 
-public struct PackedMaterial {
-    uint baseColor;
-    uint metallicRoughness;
-    uint normal;
-    uint emissive;
-
-    public Material unpack() {
-        Material material;
-
-        material.baseColor = pow(unpackUnorm4x8ToFloat(baseColor).rgb, 2.2);
-        float2 metallicRoughness = unpackUnorm4x8ToFloat(metallicRoughness).xy;
+    public static Material unpack(uint4 packed) {
+    Material material;
+        material.baseColor = pow(unpackUnorm4x8ToFloat(packed.x).rgb, 2.2);
+        float2 metallicRoughness = unpackUnorm4x8ToFloat(packed.y).xy;
         material.metallic = metallicRoughness.x;
         material.roughness = metallicRoughness.y;
-        material.normal = octahedron::decode(unpackUnorm2x16ToFloat(normal));
-        material.emissive = unpackHDR(emissive);
-
+        material.normal = octahedron::decode(unpackUnorm2x16ToFloat(packed.z));
+        material.emissive = unpackHDR(packed.w);
         return material;
     }
-
-    public static PackedMaterial fromRaw(uint4 raw) {
-        PackedMaterial result;
-        result.baseColor = raw.x;
-        result.metallicRoughness = raw.y;
-        result.normal = raw.z;
-        result.emissive = raw.w;
-        return result;
-    }
-
-    public uint4 toRaw() {
-        return uint4(baseColor, metallicRoughness, normal, emissive);
-    }
-};
-
-
-
+}

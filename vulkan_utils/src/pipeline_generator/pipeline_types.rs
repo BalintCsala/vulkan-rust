@@ -33,6 +33,7 @@ pub struct GraphicsPipeline {
     device: Arc<Device>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    surface_format: vk::Format,
 }
 
 impl GraphicsPipeline {
@@ -40,12 +41,14 @@ impl GraphicsPipeline {
         definition_path: String,
         device: Arc<Device>,
         pipeline_layout: vk::PipelineLayout,
+        surface_format: vk::Format,
     ) -> Self {
         let mut result = Self {
             definition_path,
             device,
             pipeline_layout,
             pipeline: vk::Pipeline::null(),
+            surface_format,
         };
         result.load_pipeline();
         result
@@ -137,7 +140,9 @@ impl GraphicsPipeline {
                                 .color_attachment_formats(
                                     &color_attachments
                                         .iter()
-                                        .map(|color_attachment| color_attachment.to_format())
+                                        .map(|color_attachment| {
+                                            color_attachment.to_format(self.surface_format)
+                                        })
                                         .collect::<Vec<_>>(),
                                 )
                                 .depth_attachment_format(depth_format),
@@ -156,6 +161,25 @@ impl GraphicsPipeline {
         unsafe {
             self.device.destroy_shader_module(module, None);
         };
+    }
+
+    pub fn draw(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        unsafe {
+            self.device.cmd_draw(
+                command_buffer,
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            );
+        }
     }
 
     pub fn draw_indexed(
