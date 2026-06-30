@@ -16,6 +16,10 @@ public struct Material {
         return f0 + (1.0 - f0) * pow(1.0 - cosTheta, 5.0);
     }
 
+    public float3 diffuse() {
+        return baseColor * (1.0 - metallic);
+    }
+
     public float3 brdf(float3 view, float3 light) {
         float3 radiance = 0.0;
 
@@ -25,15 +29,7 @@ public struct Material {
         float NdotL = dot(normal, light);
         float NdotV = dot(normal, view);
 
-        // // Diffuse (Hammon)
-        // float facing = dot(view, light) * 0.5 + 0.5;
-        // float rough = facing * (0.9 - 0.4 * facing) * (0.5 + NdotH) / NdotH;
-        // float smooth = 1.05 * (1.0 - pow(1.0 - NdotL, 5.0)) * (1.0 - pow(1.0 - NdotV, 5.0));
-        // float single = 1.0 / PI * lerp(smooth, rough, roughness);
-        // float multi = 0.1159 * roughness;
-        //
-        // float3 diffuse = baseColor * (single + baseColor * multi) * (1.0 - metallic);
-        float3 diffuse = baseColor;
+        float3 diffuse = diffuse();
 
         radiance += diffuse * saturate(NdotL);
 

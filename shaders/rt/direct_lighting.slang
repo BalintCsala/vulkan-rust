@@ -61,7 +61,7 @@ void rgen() {
         sunPayload
     );
 
-    float3 radiance = material.emissive;
+    float3 radiance = material.emissive * 10.0;
     if (sunPayload.dist < 0) {
         float3 view = normalize(pushConstants.cameraPosition - worldPos);
         radiance += material.brdf(view, LIGHT_DIR) * 1.0;

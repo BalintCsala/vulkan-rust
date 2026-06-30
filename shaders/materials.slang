@@ -20,13 +20,14 @@ PushConstants pushConstants;
 [numthreads(8, 8, 1)]
 void cs(uint2 gid: SV_DispatchThreadID) {
     var visibilityBuffer = getStorageImage<RWTexture2D<uint>>(pushConstants.visibilityBufferId);
+    var gbuffer = getStorageImage<RWTexture2D<uint4>>(pushConstants.gbufferId);
 
     var uniqueId = visibilityBuffer[gid];
     if (uniqueId == 0) {
+        gbuffer[gid] = 0;
         return;
     }
 
-    var gbuffer = getStorageImage<RWTexture2D<uint4>>(pushConstants.gbufferId);
 
     var instanceId = getInstanceIdFromUniqueId(uniqueId);
     var triangleId = getTriangleIdFromUniqueId(uniqueId);

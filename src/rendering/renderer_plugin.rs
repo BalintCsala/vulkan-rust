@@ -9,9 +9,10 @@ use bevy::{
         query::{Added, Changed},
         resource::Resource,
         schedule::{IntoScheduleConfigs, ScheduleLabel},
-        system::{Commands, Query, Res, ResMut, Single},
+        system::{Commands, IntoResult, Query, Res, ResMut, Single},
     },
     input::{ButtonInput, keyboard::KeyCode},
+    math::Vec3,
     transform::components::{GlobalTransform, Transform},
     window::{RawHandleWrapperHolder, Window},
 };
@@ -27,9 +28,10 @@ use crate::{
     rendering::{
         components::camera::Camera,
         generated_pipelines::{
-            DirectLightingPipelinePushConstants, MaterialsPipelinePushConstants,
-            TonemapPipelinePushConstants, VisibilityPipelinePushConstants,
-            create_direct_lighting_pipeline, create_materials_pipeline, create_tonemap_pipeline,
+            DirectLightingPipelinePushConstants, IndirectDiffusePipelinePushConstants,
+            MaterialsPipelinePushConstants, TonemapPipelinePushConstants,
+            VisibilityPipelinePushConstants, create_direct_lighting_pipeline,
+            create_indirect_diffuse_pipeline, create_materials_pipeline, create_tonemap_pipeline,
             create_visibility_pipeline,
         },
         resource_manager::{ImageReference, ImageSize, InstanceReference, ResourceManager},
@@ -48,6 +50,7 @@ struct RendererState {
     visibility_pipeline: GraphicsPipeline,
     materials_pipeline: ComputePipeline,
     direct_lighting_pipeline: RaytracingPipeline,
+    indirect_diffuse_pipeline: RaytracingPipeline,
     tonemap_pipeline: GraphicsPipeline,
 
     depth: ImageReference,
@@ -110,6 +113,14 @@ fn create_render_resources(
         resource_manager.bindless_pipeline_layout,
     );
 
+    let indirect_diffuse_pipeline = create_indirect_diffuse_pipeline(
+        vulkan_state.instance.clone(),
+        vulkan_state.physical_device,
+        vulkan_state.device.clone(),
+        vulkan_state.allocator.clone(),
+        resource_manager.bindless_pipeline_layout,
+    );
+
     let visibility_pipeline = create_visibility_pipeline(
         vulkan_state.device.clone(),
         resource_manager.bindless_pipeline_layout,
@@ -132,6 +143,7 @@ fn create_render_resources(
         visibility_pipeline,
         materials_pipeline,
         direct_lighting_pipeline,
+        indirect_diffuse_pipeline,
         tonemap_pipeline,
 
         gbuffer: resource_manager.create_empty_image(
@@ -198,6 +210,8 @@ fn reload_shaders(
         renderer_state.materials_pipeline.reload();
         renderer_state.visibility_pipeline.reload();
         renderer_state.direct_lighting_pipeline.reload();
+        renderer_state.indirect_diffuse_pipeline.reload();
+        renderer_state.tonemap_pipeline.reload();
     }
 }
 
@@ -252,7 +266,7 @@ fn render(
     }
 
     let (camera_transform, camera_data) = *camera;
-    // let sun_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
+    let sun_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
 
     let view_projection = camera_data
         .projection_matrix(vulkan_state.extent.width, vulkan_state.extent.height)
@@ -444,17 +458,30 @@ fn render(
         1,
     );
 
-    // Path tracing
+    unsafe {
+        device.cmd_pipeline_barrier2(
+            command_buffer,
+            &vk::DependencyInfo::default().memory_barriers(&[vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR)
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ)]),
+        );
+    }
+
+    // Direct Lighting
+    let tlas_address = unsafe {
+        device
+            .acceleration_structure
+            .get_acceleration_structure_device_address(
+                &vk::AccelerationStructureDeviceAddressInfoKHR::default()
+                    .acceleration_structure(resource_manager.tlas),
+            )
+    };
+
     renderer_state.direct_lighting_pipeline.bind(command_buffer);
     let mut direct_lighting_push_constants = DirectLightingPipelinePushConstants {
-        tlas: unsafe {
-            device
-                .acceleration_structure
-                .get_acceleration_structure_device_address(
-                    &vk::AccelerationStructureDeviceAddressInfoKHR::default()
-                        .acceleration_structure(resource_manager.tlas),
-                )
-        },
+        tlas: tlas_address,
         models: resource_manager.model_buffer.address,
         instances: resource_manager.instance_buffer.address,
         view_projection_inv: [0.0; 16],
@@ -488,6 +515,46 @@ fn render(
     renderer_state
         .direct_lighting_pipeline
         .trace_rays(command_buffer, width, height, 1);
+
+    // Indirect diffuse
+    renderer_state
+        .indirect_diffuse_pipeline
+        .bind(command_buffer);
+
+    let mut indirect_diffuse_push_constants = IndirectDiffusePipelinePushConstants {
+        tlas: tlas_address,
+        models: resource_manager.model_buffer.address,
+        instances: resource_manager.instance_buffer.address,
+        view_projection_inv: [0.0; 16],
+        sun_dir: [0.0; 3],
+        depth_id: renderer_state.depth.into(),
+        gbuffer_id: renderer_state.gbuffer.into(),
+        output_id: renderer_state.indirect_diffuse.into(),
+        frame: renderer_state.frame,
+        _pad0: 0,
+    };
+
+    sun_direction.write_to_slice(&mut indirect_diffuse_push_constants.sun_dir);
+    view_projection
+        .inverse()
+        .write_cols_to_slice(&mut indirect_diffuse_push_constants.view_projection_inv);
+
+    unsafe {
+        device.cmd_push_constants(
+            command_buffer,
+            resource_manager.bindless_pipeline_layout,
+            vk::ShaderStageFlags::ALL,
+            0,
+            bytemuck::bytes_of(&indirect_diffuse_push_constants),
+        );
+    }
+
+    renderer_state.indirect_diffuse_pipeline.trace_rays(
+        command_buffer,
+        width.div_ceil(2),
+        height.div_ceil(2),
+        1,
+    );
 
     unsafe {
         device.cmd_pipeline_barrier2(

@@ -1,5 +1,6 @@
 import lib.bindless;
 import lib.tonemap;
+import lib.material;
 
 struct PushConstants {
     int gbufferId;
@@ -42,9 +43,10 @@ float4 fs(VertexOut i) {
     float3 radiance;
     if (all(gbufferData == 0u)) {
         // Sky
-        radiance = pow(float3(0.45, 0.61, 0.84), 2.2) * 0.05;
+        radiance = pow(float3(0.45, 0.61, 0.84), 2.2) * 0.5;
     } else {
-        radiance = directLightingOutput[pixel].rgb + indirectDiffuseOutput[pixel / 2].rgb;
+        Material material = Material.unpack(gbufferData);
+        radiance = directLightingOutput[pixel].rgb + material.diffuse() * indirectDiffuseOutput[pixel / 2].rgb;
     }
 
     return float4(tonemap(radiance * 5.0), 1.0);
