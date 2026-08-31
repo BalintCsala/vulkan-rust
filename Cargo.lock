@@ -156,9 +156,9 @@ checksum = "84521a3cf562bc62942e294181d9eef17eb38ceb8c68677bc49f144e4c3d4f8d"
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "approx"
@@ -242,6 +242,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "assets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "bevy",
+ "bytemuck",
+ "image",
+ "renderer",
+ "serde",
+ "serde_json",
+ "vulkan_utils",
 ]
 
 [[package]]
@@ -2836,6 +2851,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
+name = "renderer"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "ash-window",
+ "bevy",
+ "bytemuck",
+ "vk-mem",
+ "vulkan_utils",
+ "winit",
+]
+
+[[package]]
 name = "rgb"
 version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3398,8 +3426,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vk-mem"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d7ba61d9155d2a6eb77693f6e83953c392cda219d2882fb0a95f781c5eb06ec"
+source = "git+https://github.com/gwihlidal/vk-mem-rs?branch=master#67010c8f881f6603731c462bb41f2169e6f2edd4"
 dependencies = [
  "ash",
  "bitflags 2.11.1",
@@ -3410,14 +3437,9 @@ dependencies = [
 name = "vulkan-rust"
 version = "0.1.0"
 dependencies = [
- "ash",
- "ash-window",
+ "assets",
  "bevy",
- "bytemuck",
- "image",
- "serde",
- "serde_json",
- "vk-mem",
+ "renderer",
  "vulkan_utils",
  "winit",
 ]

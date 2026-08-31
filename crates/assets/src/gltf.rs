@@ -1,75 +1,30 @@
 pub mod types;
 
+use anyhow::{Result, anyhow};
+use bytemuck::Pod;
 use std::{
     collections::HashMap,
     io::{Cursor, Read, Seek},
-    str::Utf8Error,
     sync::{Arc, Mutex},
     thread,
 };
 
 use ash::vk;
 use bevy::{
-    math::{Mat4, Quat, Vec3},
+    math::{Mat4, Quat, U16Vec4, Vec2, Vec3, Vec4},
     platform::collections::HashSet,
 };
-use image::{ImageError, ImageFormat, ImageReader};
+use image::{ImageFormat, ImageReader};
 
-use crate::{
-    assets::{
-        gltf::types::AlphaMode,
-        model::{Model, ModelData, ModelRenderInfo},
+use crate::gltf::types::AlphaMode;
+use renderer::{
+    materials::standard_material::StandardMaterialData,
+    mesh::{GeometryType, Mesh},
+    resource_manager::{
+        ImageReference, ImageSize, MaterialReference, MeshReference, ResourceManager,
+        SamplerReference,
     },
-    rendering::resource_manager::{ImageReference, ImageSize, ResourceManager, SamplerReference},
 };
-
-use vulkan_utils::{
-    complex_types::buffer::Buffer,
-    wrappers::{allocator::Allocator, device::Device, sampler::Sampler},
-};
-
-#[derive(Debug)]
-pub enum Error {
-    IO,
-    Utf8,
-    EndOfFile,
-    InvalidFileType,
-    UnsupportedVersion,
-    MissingJSONChunk,
-    MissingBinChunk,
-    JSONParse(serde_json::Error),
-    NoSceneNodes,
-    MissingRequiredAttribute,
-    InvalidAttribute,
-    ImageParsingFailed,
-}
-
-impl From<std::io::Error> for Error {
-    fn from(value: std::io::Error) -> Self {
-        match value.kind() {
-            std::io::ErrorKind::UnexpectedEof => Self::EndOfFile,
-            _ => Self::IO,
-        }
-    }
-}
-
-impl From<Utf8Error> for Error {
-    fn from(_: Utf8Error) -> Self {
-        Error::Utf8
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        Error::JSONParse(err)
-    }
-}
-
-impl From<ImageError> for Error {
-    fn from(_value: ImageError) -> Self {
-        Error::ImageParsingFailed
-    }
-}
 
 impl types::Node {
     pub fn model_matrix(&self) -> Mat4 {
@@ -84,20 +39,96 @@ impl types::Node {
     }
 }
 
-fn read_u32<R: Read>(reader: &mut R) -> Result<u32, Error> {
+fn read_u32<R: Read>(reader: &mut R) -> std::io::Result<u32> {
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
     Ok(u32::from_le_bytes(buf))
 }
 
-pub struct Mesh {
-    pub primitives: Vec<usize>,
+fn bytes_to_vec<T: Pod>(data: Vec<u8>) -> Vec<T> {
+    data.chunks_exact(size_of::<T>())
+        .map(bytemuck::pod_read_unaligned)
+        .collect()
+}
+
+pub struct GltfMesh {
+    indices: Vec<u32>,
+    positions: Vec<Vec3>,
+    normals: Option<Vec<Vec3>>,
+    tangents: Option<Vec<Vec4>>,
+    texcoords_0: Option<Vec<Vec2>>,
+    texcoords_1: Option<Vec<Vec2>>,
+    colors: Option<Vec<Vec4>>,
+    joints: Option<Vec<U16Vec4>>,
+    weights: Option<Vec<Vec4>>,
+    geometry_type: GeometryType,
+    name: String,
+}
+
+pub struct GltfModel {
+    mesh: GltfMesh,
+    material: StandardMaterialData,
+}
+
+impl GltfModel {
+    pub fn upload(
+        &self,
+        resource_manager: &mut ResourceManager,
+    ) -> (MeshReference, MaterialReference) {
+        let mesh = resource_manager.upload_mesh(&self.mesh);
+        let material = resource_manager.upload_material_data(&self.material);
+        (mesh, material)
+    }
+}
+
+impl Mesh for GltfMesh {
+    fn indices(&self) -> &Vec<u32> {
+        &self.indices
+    }
+
+    fn positions(&self) -> &Vec<Vec3> {
+        &self.positions
+    }
+
+    fn normals(&self) -> Option<&Vec<Vec3>> {
+        self.normals.as_ref()
+    }
+
+    fn tangents(&self) -> Option<&Vec<Vec4>> {
+        self.tangents.as_ref()
+    }
+
+    fn texcoords_0(&self) -> Option<&Vec<Vec2>> {
+        self.texcoords_0.as_ref()
+    }
+
+    fn texcoords_1(&self) -> Option<&Vec<Vec2>> {
+        self.texcoords_1.as_ref()
+    }
+
+    fn colors(&self) -> Option<&Vec<Vec4>> {
+        self.colors.as_ref()
+    }
+
+    fn joints(&self) -> Option<&Vec<U16Vec4>> {
+        self.joints.as_ref()
+    }
+
+    fn weights(&self) -> Option<&Vec<Vec4>> {
+        self.weights.as_ref()
+    }
+
+    fn geometry_type(&self) -> &GeometryType {
+        &self.geometry_type
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 pub struct Gltf {
-    _buffers: Vec<Buffer>,
-    pub primitives: Vec<Model>,
-    pub meshes: Vec<Mesh>,
+    pub primitives: Vec<Vec<GltfModel>>,
     pub scene: Option<usize>,
     pub scenes: Option<Vec<types::Scene>>,
     pub nodes: Vec<types::Node>,
@@ -105,19 +136,17 @@ pub struct Gltf {
 
 impl Gltf {
     pub fn from_glb<R: Read + Seek>(
-        device: &Arc<Device>,
-        allocator: &Arc<Allocator>,
         resource_manager: &mut ResourceManager,
         reader: &mut R,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         let magic = read_u32(reader)?;
         if magic != 0x46546C67 {
-            return Err(Error::InvalidFileType);
+            return Err(anyhow!("Invalid file type for GLB file"));
         }
 
         let version = read_u32(reader)?;
         if version != 2 {
-            return Err(Error::UnsupportedVersion);
+            return Err(anyhow!("Unsupported GLTF version"));
         }
 
         let _length = read_u32(reader);
@@ -128,7 +157,7 @@ impl Gltf {
         loop {
             let chunk_length = match read_u32(reader) {
                 Ok(chunk_length) => chunk_length,
-                Err(Error::EndOfFile) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => Err(e)?,
             };
             let chunk_type = read_u32(reader)?;
@@ -161,12 +190,12 @@ impl Gltf {
 
         let info = match info {
             Some(info) => info,
-            None => return Err(Error::MissingJSONChunk),
+            None => return Err(anyhow!("Missing JSON chunk from GLB file")),
         };
 
         let bin = match bin_content {
             Some(bin) => bin,
-            None => return Err(Error::MissingBinChunk),
+            None => return Err(anyhow!("Missing BIN chunk from GLB file")),
         };
 
         let mut srgb_textures = HashSet::new();
@@ -190,8 +219,7 @@ impl Gltf {
             }
         }
 
-        let default_sampler_ref = resource_manager.add_sampler(Sampler::new(
-            device.clone(),
+        let default_sampler_ref = resource_manager.add_sampler(
             &vk::SamplerCreateInfo::default()
                 .mag_filter(vk::Filter::LINEAR)
                 .min_filter(vk::Filter::LINEAR)
@@ -199,7 +227,7 @@ impl Gltf {
                 .address_mode_v(vk::SamplerAddressMode::REPEAT)
                 .min_lod(0.0)
                 .max_lod(6.0),
-        ));
+        );
 
         let mut sampler_lookup = HashMap::new();
         if let Some(samplers) = &info.samplers {
@@ -242,8 +270,7 @@ impl Gltf {
                         _ => panic!("Unhandled wrap_s value: {}", sampler.wrap_t),
                     };
 
-                    let sampler_ref = resource_manager.add_sampler(Sampler::new(
-                        device.clone(),
+                    let sampler_ref = resource_manager.add_sampler(
                         &vk::SamplerCreateInfo::default()
                             .mag_filter(mag_filter)
                             .min_filter(min_filter)
@@ -252,7 +279,7 @@ impl Gltf {
                             .address_mode_v(address_mode_v)
                             .min_lod(0.0)
                             .max_lod(6.0),
-                    ));
+                    );
                     sampler_lookup.insert(sampler_id, sampler_ref);
                 });
         }
@@ -293,6 +320,10 @@ impl Gltf {
                                     texture_id,
                                     texture.sampler,
                                     img,
+                                    texture
+                                        .name
+                                        .clone()
+                                        .unwrap_or(format!("Gltf texture {texture_id}").to_owned()),
                                 ));
                             }
                         });
@@ -304,13 +335,9 @@ impl Gltf {
 
             let mut uploads = decoded_images
                 .iter()
-                .enumerate()
-                .map(|(i, (texture_id, sampler_id, img))| {
+                .map(|(texture_id, sampler_id, img, name)| {
                     let image_ref = resource_manager.create_empty_image(
-                        crate::rendering::resource_manager::ImageSize::Fixed(
-                            img.width(),
-                            img.height(),
-                        ),
+                        ImageSize::Fixed(img.width(), img.height()),
                         if srgb_textures.contains(texture_id) {
                             vk::Format::R8G8B8A8_SRGB
                         } else {
@@ -327,7 +354,7 @@ impl Gltf {
                         },
                         u32::min(img.width(), img.height()).ilog2() + 1,
                         1,
-                        format!("Gltf texture #{i}"),
+                        name.clone()
                     );
                     texture_lookup.insert(
                         *texture_id,
@@ -349,41 +376,34 @@ impl Gltf {
             println!("Finished uploading images");
         }
 
-        let mut meshes = Vec::new();
         let mut primitives = Vec::new();
-        let mut buffers = Vec::new();
         if let Some(gltf_meshes) = &info.meshes {
-            for (i, mesh) in gltf_meshes.iter().enumerate() {
-                let mut mesh_primitives = Vec::new();
-                for primitive in &mesh.primitives {
-                    mesh_primitives.push(primitives.len());
-                    primitives.push(Self::load_primitive(
-                        device,
-                        allocator,
-                        resource_manager,
+            for mesh in gltf_meshes.iter() {
+                let mut models = Vec::new();
+                for (i, primitive) in mesh.primitives.iter().enumerate() {
+                    let (mesh, material) = Self::load_primitive(
                         &texture_lookup,
                         &info,
                         primitive,
                         &bin,
-                        &mut buffers,
-                        mesh.name.as_ref().unwrap_or(&format!("Mesh {i}")),
-                    )?);
+                        format!(
+                            "{} primitive #{i}",
+                            mesh.name.as_ref().unwrap_or(&"Mesh".to_owned())
+                        ),
+                    )?;
+                    models.push(GltfModel { mesh, material });
                 }
-                meshes.push(Mesh {
-                    primitives: mesh_primitives,
-                });
+                primitives.push(models);
             }
         }
 
         let nodes = match info.nodes {
             Some(nodes) => nodes,
-            None => return Err(Error::NoSceneNodes),
+            None => return Err(anyhow!("No scene nodes in GLTF file")),
         };
 
         Ok(Self {
-            _buffers: buffers,
             primitives,
-            meshes,
             scene: info.scene,
             scenes: info.scenes,
             nodes,
@@ -391,16 +411,12 @@ impl Gltf {
     }
 
     fn load_primitive(
-        device: &Arc<Device>,
-        allocator: &Arc<Allocator>,
-        resource_manager: &mut ResourceManager,
         texture_lookup: &HashMap<usize, (ImageReference, SamplerReference)>,
         info: &types::Info,
         primitive: &types::Primitive,
         bin: &[u8],
-        buffers: &mut Vec<Buffer>,
-        mesh_name: &str,
-    ) -> Result<Model, Error> {
+        name: String,
+    ) -> Result<(GltfMesh, StandardMaterialData)> {
         let mut positions = None;
         let mut normals = None;
         let mut tangents = None;
@@ -415,40 +431,27 @@ impl Gltf {
         for (name, accessor_id) in &primitive.attributes {
             let accessor = &info.accessors[*accessor_id];
             let data = Self::load_accessor_data(info, bin, accessor)?;
-
-            let mut buffer = Buffer::new(
-                device,
-                allocator.clone(),
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-                data.len() as u64,
-                &format!("{mesh_name} {name}"),
-            );
-            buffer.write(&data, 0);
-
             match name.as_str() {
                 "POSITION" => {
-                    positions = Some(buffer.address);
+                    positions = Some(bytes_to_vec(data));
                     positions_count = accessor.count;
                 }
-                "NORMAL" => normals = Some(buffer.address),
-                "TANGENT" => tangents = Some(buffer.address),
-                "TEXCOORD_0" => texcoords_0 = Some(buffer.address),
-                "TEXCOORD_1" => texcoords_1 = Some(buffer.address),
-                "COLOR_0" => colors = Some(buffer.address),
-                "JOINTS_0" => joints = Some(buffer.address),
-                "WEIGHTS_0" => weights = Some(buffer.address),
+                "NORMAL" => normals = Some(bytes_to_vec(data)),
+                "TANGENT" => tangents = Some(bytes_to_vec(data)),
+                "TEXCOORD_0" => texcoords_0 = Some(bytes_to_vec(data)),
+                "TEXCOORD_1" => texcoords_1 = Some(bytes_to_vec(data)),
+                "COLOR_0" => colors = Some(bytes_to_vec(data)),
+                "JOINTS_0" => joints = Some(bytes_to_vec(data)),
+                "WEIGHTS_0" => weights = Some(bytes_to_vec(data)),
                 _ => println!("Unhandled gltf attribute {name}"),
-            }
-            buffers.push(buffer);
+            };
         }
 
-        let positions = match positions {
-            Some(positions) => positions,
-            _ => return Err(Error::MissingRequiredAttribute),
+        let Some(positions) = positions else {
+            return Err(anyhow!("Missing required attribute"));
         };
-        let indices_name = format!("{mesh_name} indices");
-        let (indices, index_count) = match primitive.indices {
+
+        let indices = match primitive.indices {
             Some(indices) => {
                 let accessor = &info.accessors[indices];
                 let mut data = Self::load_accessor_data(info, bin, accessor)?;
@@ -463,61 +466,12 @@ impl Gltf {
                     data = inflated;
                 }
 
-                let mut indices = Buffer::new(
-                    device,
-                    allocator.clone(),
-                    vk::BufferUsageFlags::INDEX_BUFFER
-                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-                    data.len() as u64,
-                    &indices_name,
-                );
-                indices.write(&data, 0);
-
-                (indices, accessor.count)
+                bytes_to_vec(data)
             }
-            None => {
-                let mut indices = Buffer::new(
-                    device,
-                    allocator.clone(),
-                    vk::BufferUsageFlags::INDEX_BUFFER
-                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-                    positions_count as u64,
-                    &indices_name,
-                );
-                indices.write(Vec::from_iter(0..positions_count as u32).as_slice(), 0);
-                (indices, positions_count)
-            }
+            None => Vec::from_iter(0..positions_count as u32),
         };
 
-        let base_color_fallback_texture = resource_manager.get_or_create_image(
-            ImageSize::Fixed(1, 1),
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-            1,
-            1,
-            "Base color fallback".to_owned(),
-            &[0xFFFFFFFFu32],
-        );
-
-        let normal_fallback_texture = resource_manager.get_or_create_image(
-            ImageSize::Fixed(1, 1),
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-            1,
-            1,
-            "Normal fallback".to_owned(),
-            &[0xFF80FF80u32],
-        );
-
-        let opaque = (|| {
-            Some(matches!(
-                info.materials.as_ref()?[primitive.material?].alpha_mode,
-                AlphaMode::Opaque
-            ))
-        })()
-        .unwrap_or(true);
-
-        let (base_color_texture_id, base_color_texcoord_id, base_color_sampler_id) = (|| {
+        let (base_color_texture, base_color_texcoord_id, base_color_sampler) = (|| {
             let texture = info.materials.as_ref()?[primitive.material?]
                 .pbr_metallic_roughness
                 .as_ref()?
@@ -527,21 +481,31 @@ impl Gltf {
             let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
             Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
-        .unwrap_or((base_color_fallback_texture, 0, 0));
+        .unwrap_or((-1, 0, 0));
 
-        let (normal_texture_id, normal_texcoord_id, normal_sampler_id) = (|| {
+        let base_color_factor = (|| {
+            Some(
+                info.materials.as_ref()?[primitive.material?]
+                    .pbr_metallic_roughness
+                    .as_ref()?
+                    .base_color_factor,
+            )
+        })()
+        .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+
+        let (normal_texture, normal_texcoord_id, normal_sampler) = (|| {
             let texture = info.materials.as_ref()?[primitive.material?]
                 .normal_texture
                 .as_ref()?;
             let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
             Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
-        .unwrap_or((normal_fallback_texture, 0, 0));
+        .unwrap_or((-1, 0, 0));
 
         let (
-            metallic_roughness_texture_id,
+            metallic_roughness_texture,
             metallic_roughness_texcoord_id,
-            metallic_roughness_sampler_id,
+            metallic_roughness_sampler,
         ) = (|| {
             let texture = info.materials.as_ref()?[primitive.material?]
                 .pbr_metallic_roughness
@@ -553,7 +517,7 @@ impl Gltf {
         })()
         .unwrap_or((-1, 0, 0));
 
-        let (emissive_texture_id, emissive_texcoord_id, emissive_sampler_id) = (|| {
+        let (emissive_texture, emissive_texcoord_id, emissive_sampler) = (|| {
             let texture = info.materials.as_ref()?[primitive.material?]
                 .emissive_texture
                 .as_ref()?;
@@ -563,52 +527,61 @@ impl Gltf {
         .unwrap_or((-1, 0, 0));
 
         let emissive_factor =
-            (|| Some(info.materials.as_ref()?[primitive.material?].emissive_factor))().unwrap();
+            (|| Some(info.materials.as_ref()?[primitive.material?].emissive_factor))()
+                .unwrap_or([0.0, 0.0, 0.0]);
 
-        let model_ref = resource_manager.upload_model(
-            ModelData {
+        let geometry_type = (|| {
+            Some(
+                match info.materials.as_ref()?[primitive.material?].alpha_mode {
+                    AlphaMode::Opaque => GeometryType::Opaque,
+                    AlphaMode::Mask => GeometryType::Cutout,
+                    AlphaMode::Blend => GeometryType::Translucent,
+                },
+            )
+        })()
+        .unwrap_or(GeometryType::Opaque);
+
+        Ok((
+            GltfMesh {
                 positions,
-                indices: indices.address,
-                normals: normals.unwrap_or(0),
-                tangents: tangents.unwrap_or(0),
-                texcoords_0: texcoords_0.unwrap_or(0),
-                texcoords_1: texcoords_1.unwrap_or(0),
-                colors: colors.unwrap_or(0),
-                joints: joints.unwrap_or(0),
-                weights: weights.unwrap_or(0),
-
-                base_color_texture_id,
+                indices,
+                normals,
+                tangents,
+                texcoords_0,
+                texcoords_1,
+                colors,
+                joints,
+                weights,
+                geometry_type,
+                name,
+            },
+            StandardMaterialData {
+                base_color_factor,
+                base_color_texture,
                 base_color_texcoord_id,
-                base_color_sampler_id,
+                base_color_sampler,
 
-                normal_texture_id,
+                normal_texture,
                 normal_texcoord_id,
-                normal_sampler_id,
+                normal_sampler,
 
-                metallic_roughness_texture_id,
+                metallic_roughness_texture,
                 metallic_roughness_texcoord_id,
-                metallic_roughness_sampler_id,
+                metallic_roughness_sampler,
 
-                emissive_texture_id,
+                emissive_texture,
                 emissive_texcoord_id,
-                emissive_sampler_id,
-
+                emissive_sampler,
                 emissive_factor,
             },
-            indices,
-            index_count as u32,
-            positions_count as u32,
-            ModelRenderInfo { opaque },
-        );
-
-        Ok(Model { model_ref })
+        ))
     }
 
     fn load_accessor_data(
         info: &types::Info,
         bin: &[u8],
         accessor: &types::Accessor,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<Vec<u8>> {
         let component_byte_size: usize = match accessor.component_type {
             5120 => 1, // Signed byte
             5121 => 1, // Unsigned byte
@@ -616,7 +589,7 @@ impl Gltf {
             5123 => 2, // Unsigned short
             5125 => 4, // Unsigned int
             5126 => 4, // Float
-            _ => return Err(Error::InvalidAttribute),
+            _ => return Err(anyhow!("Invalid accessor component type")),
         };
 
         let components_per_element = match accessor.element_type.as_str() {
@@ -627,7 +600,7 @@ impl Gltf {
             "MAT2" => 4,
             "MAT3" => 9,
             "MAT4" => 16,
-            _ => return Err(Error::InvalidAttribute),
+            _ => return Err(anyhow!("Invalid accessor element type")),
         };
 
         let bytes_per_element = components_per_element * component_byte_size;

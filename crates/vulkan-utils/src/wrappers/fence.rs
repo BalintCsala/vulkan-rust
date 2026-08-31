@@ -2,7 +2,7 @@ use std::{ops::Deref, sync::Arc};
 
 use ash::vk;
 
-use crate::wrappers::device::Device;
+use crate::{utility_functions::assign_debug_name, wrappers::device::Device};
 
 pub struct Fence {
     handle: vk::Fence,
@@ -10,8 +10,9 @@ pub struct Fence {
 }
 
 impl Fence {
-    pub fn new(device: Arc<Device>, create_info: &vk::FenceCreateInfo) -> Self {
+    pub fn new(device: Arc<Device>, create_info: &vk::FenceCreateInfo, name: &str) -> Self {
         let handle = unsafe { device.create_fence(create_info, None).unwrap() };
+        assign_debug_name(&device, handle, name);
         Self { handle, device }
     }
 

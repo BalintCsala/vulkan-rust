@@ -4,10 +4,9 @@ import lib.forward;
 import lib.random;
 import lib.material;
 
-public struct RTPushConstantsBase {
+public struct RTPushConstantsBase<M> {
     public uint64_t tlas;
-    public ModelData *models;
-    public InstanceData *instances;
+    public InstanceData<M> *instances;
 }
 
 [raypayload] 

@@ -1,0 +1,15 @@
+[package]
+name = "assets"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash.workspace = true
+bevy.workspace = true
+bytemuck.workspace = true
+image.workspace = true
+renderer.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+vulkan_utils.workspace = true
+anyhow.workspace = true

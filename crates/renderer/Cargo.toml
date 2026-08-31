@@ -1,0 +1,16 @@
+[package]
+name = "renderer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash.workspace = true
+ash-window.workspace = true
+bevy.workspace = true
+bytemuck.workspace = true
+vk-mem.workspace = true
+vulkan_utils.workspace = true
+winit.workspace = true
+
+[build-dependencies]
+vulkan_utils.workspace = true
