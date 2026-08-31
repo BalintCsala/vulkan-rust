@@ -23,6 +23,7 @@ impl Buffer {
         usage: vk::BufferUsageFlags,
         size: u64,
         name: &str,
+        min_alignment: Option<u64>,
     ) -> Self {
         let (buffer, allocation) = unsafe {
             allocator
@@ -36,6 +37,8 @@ impl Buffer {
                             | AllocationCreateFlags::HOST_ACCESS_ALLOW_TRANSFER_INSTEAD
                             | AllocationCreateFlags::MAPPED,
                         usage: MemoryUsage::Auto,
+                        required_flags: vk::MemoryPropertyFlags::HOST_COHERENT,
+                        min_alignment: min_alignment.unwrap_or_default(),
                         ..Default::default()
                     },
                 )
@@ -72,6 +75,28 @@ impl Buffer {
                 data.len(),
             );
         };
+    }
+
+    pub fn from_data<T>(
+        device: &Arc<Device>,
+        allocator: Arc<Allocator>,
+        usage: vk::BufferUsageFlags,
+        data: &[T],
+        name: &str,
+        min_alignment: Option<u64>,
+    ) -> Self {
+        let mut res = Self::new(
+            device,
+            allocator,
+            usage,
+            u64::try_from(size_of_val(data)).unwrap(),
+            name,
+            min_alignment,
+        );
+
+        res.write(data, 0);
+
+        res
     }
 }
 

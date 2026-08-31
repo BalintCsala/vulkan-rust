@@ -25,6 +25,7 @@ VertexOut vs(uint index : SV_VertexID) {
         case 1:
             o.position = float4(-1.0, 3.0, 0.0, 1.0);
             break;
+        default:
         case 2:
             o.position = float4(3.0, -1.0, 0.0, 1.0);
             break;
@@ -46,7 +47,7 @@ float4 fs(VertexOut i) {
         radiance = pow(float3(0.45, 0.61, 0.84), 2.2) * 0.5;
     } else {
         Material material = Material.unpack(gbufferData);
-        radiance = directLightingOutput[pixel].rgb + material.diffuse() * indirectDiffuseOutput[pixel / 2].rgb;
+        radiance = directLightingOutput[pixel].rgb;// + material.diffuse() * indirectDiffuseOutput[pixel / 2].rgb;
     }
 
     return float4(tonemap(radiance * 5.0), 1.0);

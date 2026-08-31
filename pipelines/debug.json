@@ -1,0 +1,11 @@
+{
+  "structName": "Debug",
+  "shaderPath": "shaders/debug.slang",
+  "shaderInfo": {
+    "type": "graphics",
+    "vertex": "vs",
+    "fragment": "fs",
+    "colorAttachments": ["surface"],
+    "depthAttachment": "d32sfloat"
+  }
+}

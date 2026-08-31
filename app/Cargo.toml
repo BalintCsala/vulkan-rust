@@ -1,0 +1,11 @@
+[package]
+name = "vulkan-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+assets.workspace = true
+bevy.workspace = true
+renderer.workspace = true
+vulkan_utils.workspace = true
+winit.workspace = true

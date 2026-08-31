@@ -2,14 +2,14 @@ import lib.bindless;
 import lib.forward;
 import lib.random;
 import lib.material;
+import lib.materials.standard_material;
 import common;
 
 static uint MAX_PT_DEPTH = 5;
 
 struct PushConstants {
     uint64_t tlas;
-    ModelData *models;
-    InstanceData *instances;
+    InstanceData<StandardMaterial> *instances;
     float4x4 viewProjectionInv;
     float3 sunDir;
     int depthId;
@@ -29,7 +29,7 @@ float3 pathtrace(RaytracingAccelerationStructure tlas, float3 worldPos, float3 r
     ray.Direction = rayDir;
     ray.TMin = 0.01;
     ray.TMax = 256.0;
-    
+
     Payload payload;
     TraceRay(tlas, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
 

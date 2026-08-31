@@ -341,7 +341,8 @@ pub struct RaytracingPipeline {
     raygen_shader_binding_tables: vk::StridedDeviceAddressRegionKHR,
     miss_shader_binding_tables: vk::StridedDeviceAddressRegionKHR,
     hit_shader_binding_tables: vk::StridedDeviceAddressRegionKHR,
-    sbt_buffer: Buffer,
+    sbt_buffer: Option<Buffer>,
+    shader_group_base_alignment: u64,
 }
 
 impl RaytracingPipeline {
@@ -353,13 +354,15 @@ impl RaytracingPipeline {
         allocator: Arc<Allocator>,
         pipeline_layout: vk::PipelineLayout,
     ) -> Self {
-        let sbt_buffer = Buffer::new(
-            &device,
-            allocator.clone(),
-            vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR,
-            1,
-            "SBT Buffer",
-        );
+        let mut ray_tracing_pipeline_properties =
+            vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
+        let mut props = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut ray_tracing_pipeline_properties);
+
+        unsafe {
+            instance.get_physical_device_properties2(physical_device, &mut props);
+        };
+
         let mut result = Self {
             definition_path,
             instance,
@@ -371,7 +374,10 @@ impl RaytracingPipeline {
             raygen_shader_binding_tables: vk::StridedDeviceAddressRegionKHR::default(),
             miss_shader_binding_tables: vk::StridedDeviceAddressRegionKHR::default(),
             hit_shader_binding_tables: vk::StridedDeviceAddressRegionKHR::default(),
-            sbt_buffer,
+            sbt_buffer: None,
+            shader_group_base_alignment: u64::from(
+                ray_tracing_pipeline_properties.shader_group_base_alignment,
+            ),
         };
         result.load_pipeline();
         result
@@ -569,30 +575,31 @@ impl RaytracingPipeline {
             sbt_data[dst_start..dst_end].copy_from_slice(&sbt_handles[src_start..src_end]);
         }
 
-        self.sbt_buffer = Buffer::new(
+        let mut sbt_buffer = Buffer::new(
             &self.device,
             self.allocator.clone(),
             vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR,
             sbt_size as u64,
             "SBT Buffer",
+            Some(self.shader_group_base_alignment),
         );
-        self.sbt_buffer.write(&sbt_data, 0);
+        sbt_buffer.write(&sbt_data, 0);
 
         self.raygen_shader_binding_tables = self
             .raygen_shader_binding_tables
-            .device_address(self.sbt_buffer.address + raygen_offset as u64)
+            .device_address(sbt_buffer.address + raygen_offset as u64)
             .stride(handle_size_aligned as u64)
             .size(raygen_size as u64);
 
         self.miss_shader_binding_tables = self
             .miss_shader_binding_tables
-            .device_address(self.sbt_buffer.address + miss_offset as u64)
+            .device_address(sbt_buffer.address + miss_offset as u64)
             .stride(handle_size_aligned as u64)
             .size(miss_size as u64);
 
         self.hit_shader_binding_tables = self
             .hit_shader_binding_tables
-            .device_address(self.sbt_buffer.address + hit_offset as u64)
+            .device_address(sbt_buffer.address + hit_offset as u64)
             .stride(handle_size_aligned as u64)
             .size(hit_size as u64);
 
@@ -602,6 +609,8 @@ impl RaytracingPipeline {
                 .iter()
                 .for_each(|(module, _, _)| self.device.destroy_shader_module(*module, None));
         };
+
+        self.sbt_buffer = Some(sbt_buffer);
     }
 
     pub fn trace_rays(

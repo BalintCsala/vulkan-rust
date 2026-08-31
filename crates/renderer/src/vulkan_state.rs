@@ -17,7 +17,7 @@ use vulkan_utils::{
     wrappers::{allocator::Allocator, device::Device, instance::Instance},
 };
 
-const FRAMES_IN_FLIGHT: usize = 3;
+pub const FRAMES_IN_FLIGHT: usize = 2;
 
 struct FrameData {
     device: Arc<Device>,

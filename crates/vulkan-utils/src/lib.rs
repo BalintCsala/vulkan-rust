@@ -25,6 +25,7 @@ pub fn generate_pipeline_code() -> String {
                 pipeline_generator::pipeline_types::{ComputePipeline, GraphicsPipeline, RaytracingPipeline},
                 wrappers::{allocator::Allocator, device::Device, instance::Instance},
             };
+            use bevy::math::{Mat4, Mat3};
         })
         .unwrap(),
     );

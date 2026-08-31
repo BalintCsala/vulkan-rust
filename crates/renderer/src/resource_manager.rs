@@ -2,22 +2,23 @@ use std::{collections::HashMap, sync::Arc};
 
 use ash::vk;
 use bevy::{
-    ecs::resource::Resource,
+    ecs::{component::Component, resource::Resource},
     math::{Mat3, Mat4, Vec3},
 };
 
 use crate::{
-    assets::model::{ModelData, ModelRenderInfo},
-    rendering::{
-        command_cache::CommandCache,
-        generated_pipelines::{MipmapPipelinePushConstants, create_mipmap_pipeline},
-    },
+    command_cache::CommandCache,
+    generated_pipelines::{MipmapPipelinePushConstants, create_mipmap_pipeline},
+    mesh::{GeometryType, GpuMesh, Mesh},
+    vulkan_state::FRAMES_IN_FLIGHT,
 };
 use vulkan_utils::{
     complex_types::{buffer::Buffer, image::Image},
     pipeline_generator::pipeline_types::{ComputePipeline, Pipeline},
     utility_functions::{format_to_aspect, mip_level_subresource_range},
-    wrappers::{allocator::Allocator, device::Device, fence::Fence, sampler::Sampler},
+    wrappers::{
+        allocator::Allocator, device::Device, fence::Fence, instance::Instance, sampler::Sampler,
+    },
 };
 
 const SAMPLED_IMAGE_BINDING: u32 = 0;
@@ -27,7 +28,11 @@ const SAMPLER_BINDING: u32 = 2;
 const IMAGE_COUNT: u32 = 65536;
 const SAMPLER_COUNT: u32 = 65536;
 
-const MAX_MODEL_DATA_COUNT: usize = 16384;
+const MAX_MESH_COUNT: usize = 16384;
+const MATERIAL_BUFFER_SIZE: u64 = 1024 * 1024;
+
+const MAX_INSTANCE_COUNT: usize = 65535;
+const INSTANCE_BUFFER_STRIDE: usize = MAX_INSTANCE_COUNT * size_of::<GpuInstance>();
 
 const STAGING_BUFFER_SIZE: usize = 0x8000000; // 128MB
 const RT_INSTANCE_BUFFER_SIZE: u64 = 0x10000000; // 256MB
@@ -87,19 +92,44 @@ impl ImageSize {
 
 pub type ImageReference = i16;
 pub type SamplerReference = u8;
-pub type ModelReference = u16;
+
+#[derive(Component, Clone, Copy)]
+pub struct MeshReference {
+    address: vk::DeviceAddress,
+    id: usize,
+}
+
+#[derive(Component, Clone, Copy)]
+pub struct MaterialReference {
+    pub address: vk::DeviceAddress,
+}
+
 pub type InstanceReference = u16;
 
 #[repr(C)]
-struct InstanceData {
+struct GpuInstance {
+    mesh: vk::DeviceAddress,
+    material: vk::DeviceAddress,
     model: [f32; 16],
     normal: [f32; 9],
-    model_id: u32,
 }
 
-pub struct IndexData {
+impl GpuInstance {
+    pub fn new(model: Mat4, mesh: &MeshReference, material: &MaterialReference) -> Self {
+        Self {
+            mesh: mesh.address,
+            material: material.address,
+            model: model.to_cols_array(),
+            normal: Mat3::from_mat4(model).inverse().transpose().to_cols_array(),
+        }
+    }
+}
+
+pub struct MeshInfo {
     pub index_buffer: Buffer,
     pub index_count: u32,
+    blas: vk::AccelerationStructureKHR,
+    _buffers: Vec<Buffer>,
 }
 
 pub struct ImageInfo {
@@ -111,17 +141,14 @@ pub struct ImageInfo {
 }
 
 struct PendingBlasBuild {
-    position_device_address: vk::DeviceAddress,
-    index_device_address: vk::DeviceAddress,
-    position_count: u32,
-    index_count: u32,
-    reference: ModelReference,
-    render_info: ModelRenderInfo,
+    geometries: Vec<vk::AccelerationStructureGeometryKHR<'static>>,
+    build_range_infos: Vec<vk::AccelerationStructureBuildRangeInfoKHR>,
+    scratch_buffer: Buffer,
+    blas: vk::AccelerationStructureKHR,
 }
 
-struct RTInstance {
-    transform: vk::TransformMatrixKHR,
-    model_reference: ModelReference,
+struct Limits {
+    min_acceleration_structure_scratch_offset_alignment: u64,
 }
 
 #[derive(Resource)]
@@ -144,28 +171,38 @@ pub struct ResourceManager {
     samplers: Vec<Sampler>,
 
     // TODO: Better suballocation strategy
-    pub model_buffer: Buffer,
-    pub index_data: Vec<IndexData>,
-    next_model_ref: ModelReference,
-    pub model_blases: Vec<vk::AccelerationStructureKHR>,
-    pending_blas_builds: Vec<PendingBlasBuild>,
+    pub mesh_buffer: Buffer,
+    pub mesh_offset: usize,
+    pub meshes: Vec<MeshInfo>,
+
+    material_offset: usize,
+    pub material_buffer: Buffer,
+
+    _blas_buffers: Vec<Buffer>,
     pub tlas: vk::AccelerationStructureKHR,
     acceleration_structure_buffers: Vec<Buffer>,
     fence: Fence,
 
-    pub instance_buffer: Buffer,
-    rt_instances: Vec<RTInstance>,
+    pending_blas_builds: Vec<PendingBlasBuild>,
+
+    instance_buffer: Buffer,
     rt_instance_buffer: Buffer,
-    next_instance_ref: InstanceReference,
+    rt_instance_count: usize,
 
     staging_buffer: Buffer,
 
     mipmap_pipeline: ComputePipeline,
+
+    limits: Limits,
+
+    frame_index: u32,
 }
 
 impl ResourceManager {
     pub fn new(
+        instance: &Arc<Instance>,
         device: Arc<Device>,
+        physical_device: &vk::PhysicalDevice,
         allocator: Arc<Allocator>,
         queue: vk::Queue,
         extent: vk::Extent2D,
@@ -239,20 +276,31 @@ impl ResourceManager {
                 .unwrap()[0]
         };
 
-        let model_buffer = Buffer::new(
+        let mesh_buffer = Buffer::new(
             &device,
             allocator.clone(),
             vk::BufferUsageFlags::empty(),
-            (MAX_MODEL_DATA_COUNT * size_of::<ModelData>()) as u64,
-            "Model data buffer",
+            (MAX_MESH_COUNT * size_of::<GpuMesh>()) as u64,
+            "Mesh buffer",
+            None,
+        );
+
+        let material_buffer = Buffer::new(
+            &device,
+            allocator.clone(),
+            vk::BufferUsageFlags::empty(),
+            MATERIAL_BUFFER_SIZE,
+            "Material buffer",
+            None,
         );
 
         let instance_buffer = Buffer::new(
             &device,
             allocator.clone(),
             vk::BufferUsageFlags::empty(),
-            (MAX_MODEL_DATA_COUNT * size_of::<ModelData>()) as u64,
+            (INSTANCE_BUFFER_STRIDE * FRAMES_IN_FLIGHT) as u64,
             "Instance buffer",
+            None,
         );
 
         let staging_buffer = Buffer::new(
@@ -261,6 +309,7 @@ impl ResourceManager {
             vk::BufferUsageFlags::TRANSFER_SRC,
             STAGING_BUFFER_SIZE as u64,
             "Staging buffer",
+            None,
         );
 
         let command_cache = CommandCache::new(device.clone(), queue);
@@ -286,10 +335,22 @@ impl ResourceManager {
             allocator.clone(),
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
             RT_INSTANCE_BUFFER_SIZE,
-            "RT Instance Buffer",
+            "RT instance buffer",
+            None,
         );
 
-        let fence = Fence::new(device.clone(), &vk::FenceCreateInfo::default());
+        let fence = Fence::new(
+            device.clone(),
+            &vk::FenceCreateInfo::default(),
+            "Resource manager fence",
+        );
+
+        let mut acceleration_structure_props =
+            vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
+        let mut props =
+            vk::PhysicalDeviceProperties2::default().push_next(&mut acceleration_structure_props);
+
+        unsafe { instance.get_physical_device_properties2(*physical_device, &mut props) };
 
         Self {
             device,
@@ -304,16 +365,24 @@ impl ResourceManager {
             next_image_reference: 0,
             samplers: Vec::new(),
 
-            model_buffer,
-            index_data: Vec::new(),
-            next_model_ref: 0,
+            mesh_buffer,
+            mesh_offset: 0,
+            meshes: Vec::new(),
 
-            model_blases: Vec::new(),
-            pending_blas_builds: Vec::new(),
+            material_offset: 0,
+            material_buffer,
+
             acceleration_structure_buffers: Vec::new(),
+
+            pending_blas_builds: Vec::new(),
+
             tlas: vk::AccelerationStructureKHR::null(),
-            rt_instances: Vec::new(),
+
             rt_instance_buffer,
+            rt_instance_count: 0,
+            instance_buffer,
+            _blas_buffers: Vec::new(),
+
             fence,
 
             command_cache,
@@ -321,9 +390,16 @@ impl ResourceManager {
             descriptor_pool,
             descriptor_layout,
             descriptor_set,
-            instance_buffer,
-            next_instance_ref: 0,
             mipmap_pipeline,
+
+            limits: Limits {
+                min_acceleration_structure_scratch_offset_alignment: u64::from(
+                    acceleration_structure_props
+                        .min_acceleration_structure_scratch_offset_alignment,
+                ),
+            },
+
+            frame_index: 0,
         }
     }
 
@@ -656,182 +732,311 @@ impl ResourceManager {
         }
     }
 
-    pub fn upload_model(
+    fn queue_blas_build(
         &mut self,
-        model: ModelData,
-        index_buffer: Buffer,
-        index_count: u32,
+        positions: vk::DeviceAddress,
         position_count: u32,
-        render_info: ModelRenderInfo,
-    ) -> ModelReference {
-        let reference = self.next_model_ref;
-        self.next_model_ref += 1;
+        indices: vk::DeviceAddress,
+        index_count: u32,
+        opaque: bool,
+    ) -> vk::AccelerationStructureKHR {
+        let geometries = vec![
+            vk::AccelerationStructureGeometryKHR::default()
+                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                .geometry(vk::AccelerationStructureGeometryDataKHR {
+                    triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                        .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                        .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: positions,
+                        })
+                        .vertex_stride(size_of::<Vec3>() as u64)
+                        .max_vertex(position_count - 1)
+                        .index_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: indices,
+                        })
+                        .index_type(vk::IndexType::UINT32),
+                })
+                .flags(if opaque {
+                    vk::GeometryFlagsKHR::OPAQUE
+                } else {
+                    vk::GeometryFlagsKHR::empty()
+                }),
+        ];
 
+        let build_range_infos = vec![
+            vk::AccelerationStructureBuildRangeInfoKHR::default().primitive_count(index_count / 3),
+        ];
+
+        let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .geometries(&geometries)
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE);
+
+        let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+        unsafe {
+            self.device
+                .acceleration_structure
+                .get_acceleration_structure_build_sizes(
+                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                    &build_info,
+                    &[index_count / 3],
+                    &mut size_info,
+                );
+        };
+
+        let blas_buffer = Buffer::new(
+            &self.device,
+            self.allocator.clone(),
+            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+            size_info.acceleration_structure_size,
+            &format!("BLAS buffer #{}", self.acceleration_structure_buffers.len()),
+            None,
+        );
+
+        let blas = unsafe {
+            self.device
+                .acceleration_structure
+                .create_acceleration_structure(
+                    &vk::AccelerationStructureCreateInfoKHR::default()
+                        .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                        .buffer(blas_buffer.handle)
+                        .size(size_info.acceleration_structure_size),
+                    None,
+                )
+                .unwrap()
+        };
+
+        let scratch_buffer = Buffer::new(
+            &self.device,
+            self.allocator.clone(),
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            size_info.build_scratch_size,
+            "BLAS scratch buffer",
+            Some(
+                self.limits
+                    .min_acceleration_structure_scratch_offset_alignment,
+            ),
+        );
+
+        self.acceleration_structure_buffers.push(blas_buffer);
         self.pending_blas_builds.push(PendingBlasBuild {
-            position_device_address: model.positions,
-            index_device_address: model.indices,
-            position_count,
-            index_count,
-            reference,
-            render_info,
+            geometries,
+            build_range_infos,
+            scratch_buffer,
+            blas,
         });
 
-        self.model_buffer
-            .write(&[model], size_of::<ModelData>() * reference as usize);
-
-        self.index_data.push(IndexData {
-            index_buffer,
-            index_count,
-        });
-
-        self.model_blases.push(vk::AccelerationStructureKHR::null());
-
-        reference
+        blas
     }
 
-    pub fn build_acceleration_structures(&mut self, device: &Arc<Device>) {
+    pub fn upload_mesh(&mut self, mesh: &impl Mesh) -> MeshReference {
+        let indices = Buffer::from_data(
+            &self.device,
+            self.allocator.clone(),
+            vk::BufferUsageFlags::INDEX_BUFFER
+                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+            mesh.indices(),
+            &format!("{} index buffer", mesh.name()),
+            None,
+        );
+
+        let positions = Buffer::from_data(
+            &self.device,
+            self.allocator.clone(),
+            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+            mesh.positions(),
+            &format!("{} position buffer", mesh.name()),
+            None,
+        );
+
+        let normals = mesh.normals().map(|normals| {
+            Buffer::from_data(
+                &self.device,
+                self.allocator.clone(),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                normals,
+                &format!("{} normal buffer", mesh.name()),
+                None,
+            )
+        });
+
+        let tangents = mesh.tangents().map(|tangents| {
+            Buffer::from_data(
+                &self.device,
+                self.allocator.clone(),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                tangents,
+                &format!("{} tangent buffer", mesh.name()),
+                None,
+            )
+        });
+
+        let texcoords_0 = mesh.texcoords_0().map(|texcoords_0| {
+            Buffer::from_data(
+                &self.device,
+                self.allocator.clone(),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                texcoords_0,
+                &format!("{} texcoord_0 buffer", mesh.name()),
+                None,
+            )
+        });
+
+        let texcoords_1 = mesh.texcoords_1().map(|texcoords_1| {
+            Buffer::from_data(
+                &self.device,
+                self.allocator.clone(),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                texcoords_1,
+                &format!("{} texcoord_1 buffer", mesh.name()),
+                None,
+            )
+        });
+
+        let colors = mesh.colors().map(|colors| {
+            Buffer::from_data(
+                &self.device,
+                self.allocator.clone(),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                colors,
+                &format!("{} color buffer", mesh.name()),
+                None,
+            )
+        });
+
+        let joints = mesh.joints().map(|joints| {
+            Buffer::from_data(
+                &self.device,
+                self.allocator.clone(),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                joints,
+                &format!("{} joint buffer", mesh.name()),
+                None,
+            )
+        });
+
+        let weights = mesh.weights().map(|weights| {
+            Buffer::from_data(
+                &self.device,
+                self.allocator.clone(),
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                weights,
+                &format!("{} weight buffer", mesh.name()),
+                None,
+            )
+        });
+
+        let gpu_mesh = GpuMesh {
+            indices: indices.address,
+            positions: positions.address,
+            normals: normals.as_ref().map_or(0, |normals| normals.address),
+            tangents: tangents.as_ref().map_or(0, |tangents| tangents.address),
+            texcoords_0: texcoords_0
+                .as_ref()
+                .map_or(0, |texcoords_0| texcoords_0.address),
+            texcoords_1: texcoords_1
+                .as_ref()
+                .map_or(0, |texcoords_1| texcoords_1.address),
+            colors: colors.as_ref().map_or(0, |colors| colors.address),
+            joints: joints.as_ref().map_or(0, |joints| joints.address),
+            weights: weights.as_ref().map_or(0, |weights| weights.address),
+        };
+
+        let index_count = u32::try_from(mesh.indices().len()).unwrap();
+
+        let blas = self.queue_blas_build(
+            positions.address,
+            u32::try_from(mesh.positions().len()).unwrap(),
+            indices.address,
+            u32::try_from(mesh.indices().iter().len()).unwrap(),
+            matches!(mesh.geometry_type(), GeometryType::Opaque),
+        );
+
+        let address = self.mesh_buffer.address + u64::try_from(self.mesh_offset).unwrap();
+        self.mesh_buffer.write(&[gpu_mesh], self.mesh_offset);
+        self.mesh_offset += size_of::<GpuMesh>();
+
+        let id = self.meshes.len();
+
+        self.meshes.push(MeshInfo {
+            index_buffer: indices,
+            index_count,
+            blas,
+            _buffers: [
+                Some(positions),
+                normals,
+                tangents,
+                texcoords_0,
+                texcoords_1,
+                colors,
+                joints,
+                weights,
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        });
+
+        MeshReference { address, id }
+    }
+
+    pub fn upload_material_data<T>(&mut self, material_data: &T) -> MaterialReference {
+        let alignment = align_of::<T>();
+
+        let offset = self.material_offset.next_multiple_of(alignment);
+
+        self.material_buffer
+            .write(std::slice::from_ref(material_data), offset);
+        self.material_offset = offset + size_of::<T>();
+
+        MaterialReference {
+            address: self.material_buffer.address + u64::try_from(offset).unwrap(),
+        }
+    }
+
+    fn build_pending_blases(&mut self) {
         if self.pending_blas_builds.is_empty() {
             return;
         }
-
         let mut build_infos = Vec::new();
         let mut build_range_infos = Vec::new();
 
-        let geometries: Vec<_> = self
-            .pending_blas_builds
-            .iter()
-            .map(|build_data| {
-                [vk::AccelerationStructureGeometryKHR::default()
-                    .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                    .geometry(vk::AccelerationStructureGeometryDataKHR {
-                        triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::default()
-                            .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                            .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: build_data.position_device_address,
-                            })
-                            .vertex_stride(size_of::<Vec3>() as u64)
-                            .max_vertex(build_data.position_count - 1)
-                            .index_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: build_data.index_device_address,
-                            })
-                            .index_type(vk::IndexType::UINT32),
-                    })
-                    .flags(if build_data.render_info.opaque {
-                        vk::GeometryFlagsKHR::OPAQUE
-                    } else {
-                        vk::GeometryFlagsKHR::empty()
-                    })]
-            })
-            .collect();
-
-        let build_ranges: Vec<_> = self
-            .pending_blas_builds
-            .iter()
-            .map(|build_data| {
-                [vk::AccelerationStructureBuildRangeInfoKHR::default()
-                    .primitive_count(build_data.index_count / 3)]
-            })
-            .collect();
-
-        let mut scratch_buffers = Vec::new();
-
-        self.pending_blas_builds
-            .iter()
-            .zip(geometries.iter())
-            .zip(build_ranges.iter())
-            .for_each(|((build_data, geometries), build_range)| {
-                let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
-                    .geometries(geometries)
+        for pending_build in &self.pending_blas_builds {
+            build_infos.push(
+                vk::AccelerationStructureBuildGeometryInfoKHR::default()
+                    .geometries(&pending_build.geometries)
                     .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
                     .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE);
+                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                    .scratch_data(vk::DeviceOrHostAddressKHR {
+                        device_address: pending_build.scratch_buffer.address,
+                    })
+                    .dst_acceleration_structure(pending_build.blas),
+            );
 
-                let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+            build_range_infos.push(pending_build.build_range_infos.as_slice());
+        }
+
+        self.command_cache
+            .run_command(*self.fence, |&command_buffer| {
                 unsafe {
-                    device
+                    self.device
                         .acceleration_structure
-                        .get_acceleration_structure_build_sizes(
-                            vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                            &build_info,
-                            &[build_data.index_count / 3],
-                            &mut size_info,
-                        );
-                };
-
-                let blas_buffer = Buffer::new(
-                    &self.device,
-                    self.allocator.clone(),
-                    vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
-                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-                    size_info.acceleration_structure_size,
-                    &format!("BLAS buffer #{}", self.acceleration_structure_buffers.len()),
-                );
-
-                let scratch_buffer = Buffer::new(
-                    &self.device,
-                    self.allocator.clone(),
-                    vk::BufferUsageFlags::STORAGE_BUFFER,
-                    size_info.build_scratch_size,
-                    "BLAS scratch buffer",
-                );
-
-                build_info = build_info.scratch_data(vk::DeviceOrHostAddressKHR {
-                    device_address: scratch_buffer.address,
-                });
-
-                let blas = unsafe {
-                    device
-                        .acceleration_structure
-                        .create_acceleration_structure(
-                            &vk::AccelerationStructureCreateInfoKHR::default()
-                                .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-                                .buffer(blas_buffer.handle)
-                                .size(size_info.acceleration_structure_size),
-                            None,
+                        .cmd_build_acceleration_structures(
+                            command_buffer,
+                            &build_infos,
+                            &build_range_infos,
                         )
-                        .unwrap()
                 };
-                build_info = build_info.dst_acceleration_structure(blas);
-
-                self.model_blases[build_data.reference as usize] = blas;
-                self.acceleration_structure_buffers.push(blas_buffer);
-                scratch_buffers.push(scratch_buffer);
-                build_infos.push(build_info);
-                build_range_infos.push(build_range.as_slice());
             });
 
-        let blas_handles: Vec<_> = self
-            .model_blases
-            .iter()
-            .map(|&blas| unsafe {
-                device
-                    .acceleration_structure
-                    .get_acceleration_structure_device_address(
-                        &vk::AccelerationStructureDeviceAddressInfoKHR::default()
-                            .acceleration_structure(blas),
-                    )
-            })
-            .collect();
+        self.pending_blas_builds.clear();
+    }
 
-        let rt_instance_data: Vec<_> = self
-            .rt_instances
-            .iter()
-            .enumerate()
-            .map(
-                |(reference, instance_data)| vk::AccelerationStructureInstanceKHR {
-                    transform: instance_data.transform,
-                    instance_custom_index_and_mask: vk::Packed24_8::new(reference as u32, 0xFF),
-                    instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
-                        0,
-                        vk::GeometryInstanceFlagsKHR::empty().as_raw() as u8,
-                    ),
-                    acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                        device_handle: blas_handles[instance_data.model_reference as usize],
-                    },
-                },
-            )
-            .collect();
-        self.rt_instance_buffer.write(&rt_instance_data, 0);
+    pub fn build_acceleration_structures(&mut self) {
+        self.build_pending_blases();
 
         let tlas_geometries = [vk::AccelerationStructureGeometryKHR::default()
             .geometry_type(vk::GeometryTypeKHR::INSTANCES)
@@ -852,12 +1057,12 @@ impl ResourceManager {
 
         let mut tlas_build_sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
-            device
+            self.device
                 .acceleration_structure
                 .get_acceleration_structure_build_sizes(
                     vk::AccelerationStructureBuildTypeKHR::DEVICE,
                     &tlas_build_info,
-                    &[self.rt_instances.len() as u32],
+                    &[self.rt_instance_count as u32],
                     &mut tlas_build_sizes,
                 );
         };
@@ -869,10 +1074,11 @@ impl ResourceManager {
                 | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
             tlas_build_sizes.acceleration_structure_size,
             "TLAS Buffer",
+            None,
         );
 
         self.tlas = unsafe {
-            device
+            self.device
                 .acceleration_structure
                 .create_acceleration_structure(
                     &vk::AccelerationStructureCreateInfoKHR::default()
@@ -892,6 +1098,10 @@ impl ResourceManager {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             tlas_build_sizes.build_scratch_size,
             "TLAS Scratch Buffer",
+            Some(
+                self.limits
+                    .min_acceleration_structure_scratch_offset_alignment,
+            ),
         );
         tlas_build_info = tlas_build_info.scratch_data(vk::DeviceOrHostAddressKHR {
             device_address: tlas_scratch_buffer.address,
@@ -901,21 +1111,11 @@ impl ResourceManager {
             .first_vertex(0)
             .transform_offset(0)
             .primitive_offset(0)
-            .primitive_count(self.rt_instances.len() as u32)];
+            .primitive_count(u32::try_from(self.rt_instance_count).unwrap())];
 
         self.fence.reset();
         self.command_cache
             .run_command(*self.fence, |&command_buffer| {
-                unsafe {
-                    device
-                        .acceleration_structure
-                        .cmd_build_acceleration_structures(
-                            command_buffer,
-                            &build_infos,
-                            &build_range_infos,
-                        )
-                };
-
                 unsafe {
                     self.device.cmd_pipeline_barrier2(
                         command_buffer,
@@ -934,7 +1134,7 @@ impl ResourceManager {
                 }
 
                 unsafe {
-                    device
+                    self.device
                         .acceleration_structure
                         .cmd_build_acceleration_structures(
                             command_buffer,
@@ -945,23 +1145,10 @@ impl ResourceManager {
             });
 
         self.fence.wait();
-        self.pending_blas_builds.clear();
     }
 
-    pub fn create_instance(
-        &mut self,
-        model_matrix: &Mat4,
-        model_ref: &ModelReference,
-    ) -> InstanceReference {
-        let reference = self.next_instance_ref;
-        self.next_instance_ref += 1;
-
-        let mut instance_data = InstanceData {
-            model: [0.0; 16],
-            normal: [0.0; 9],
-            model_id: (*model_ref) as u32,
-        };
-        model_matrix.write_cols_to_slice(&mut instance_data.model);
+    pub fn create_instance(&mut self, model_matrix: Mat4, mesh: &MeshReference) {
+        self.build_pending_blases();
 
         let mut rt_instance = [0.0f32; 12];
         for i in 0..3 {
@@ -970,24 +1157,49 @@ impl ResourceManager {
                 .row(i)
                 .write_to_slice(&mut rt_instance[start_index..start_index + 4]);
         }
-        self.rt_instances.push(RTInstance {
+        let blas_address = unsafe {
+            self.device
+                .acceleration_structure
+                .get_acceleration_structure_device_address(
+                    &vk::AccelerationStructureDeviceAddressInfoKHR::default()
+                        .acceleration_structure(self.meshes[mesh.id].blas),
+                )
+        };
+        let rt_instance_data = [vk::AccelerationStructureInstanceKHR {
             transform: vk::TransformMatrixKHR {
                 matrix: rt_instance,
             },
-            model_reference: *model_ref,
-        });
+            instance_custom_index_and_mask: vk::Packed24_8::new(
+                u32::try_from(mesh.id).unwrap(),
+                0xFF,
+            ),
+            instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
+                0,
+                vk::GeometryInstanceFlagsKHR::empty().as_raw() as u8,
+            ),
+            acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                device_handle: blas_address,
+            },
+        }];
 
-        Mat3::from_mat4(*model_matrix)
-            .transpose()
-            .inverse()
-            .write_cols_to_slice(&mut instance_data.normal);
-
-        self.instance_buffer.write(
-            &[instance_data],
-            size_of::<InstanceData>() * reference as usize,
+        let rt_instance_id = self.rt_instance_count;
+        self.rt_instance_count += 1;
+        self.rt_instance_buffer.write(
+            &rt_instance_data,
+            rt_instance_id * size_of::<vk::AccelerationStructureInstanceKHR>(),
         );
+    }
 
-        reference
+    pub fn write_instances(&mut self, instances: &[(Mat4, &MeshReference, &MaterialReference)]) {
+        let gpu_instances: Vec<_> = instances
+            .iter()
+            .map(|(model_matrix, mesh, material)| GpuInstance::new(*model_matrix, mesh, material))
+            .collect();
+        self.instance_buffer.write(
+            &gpu_instances,
+            usize::try_from(self.current_instance_buffer_offset()).unwrap(),
+        );
+        // TODO: RT instance
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -1082,8 +1294,10 @@ impl ResourceManager {
         };
     }
 
-    pub fn add_sampler(&mut self, sampler: Sampler) -> SamplerReference {
+    pub fn add_sampler(&mut self, create_info: &vk::SamplerCreateInfo) -> SamplerReference {
         let reference = self.samplers.len() as SamplerReference;
+
+        let sampler = Sampler::new(self.device.clone(), create_info);
 
         unsafe {
             self.device.update_descriptor_sets(
@@ -1102,16 +1316,32 @@ impl ResourceManager {
         reference
     }
 
-    pub fn get_index_data(&self, model_ref: ModelReference) -> &IndexData {
-        &self.index_data[model_ref as usize]
+    pub fn next_frame(&mut self) {
+        self.frame_index = (self.frame_index + 1) % u32::try_from(FRAMES_IN_FLIGHT).unwrap();
     }
 
-    pub fn get_image(&self, reference: &ImageReference) -> &Image {
-        &self.images[reference].image
+    pub fn get_index_buffer(&self, mesh: &MeshReference) -> &Buffer {
+        &self.meshes[mesh.id].index_buffer
+    }
+
+    pub fn get_index_count(&self, mesh: &MeshReference) -> u32 {
+        self.meshes[mesh.id].index_count
+    }
+
+    pub fn get_image(&self, image: &ImageReference) -> &Image {
+        &self.images[image].image
     }
 
     pub fn get_image_reference_by_name(&self, name: &str) -> Option<ImageReference> {
         self.images_by_name.get(name).copied()
+    }
+
+    fn current_instance_buffer_offset(&self) -> u64 {
+        u64::try_from(INSTANCE_BUFFER_STRIDE).unwrap() * u64::from(self.frame_index)
+    }
+
+    pub fn get_instance_buffer_address(&self) -> vk::DeviceAddress {
+        self.instance_buffer.address + self.current_instance_buffer_offset()
     }
 }
 
@@ -1140,13 +1370,11 @@ impl Drop for ResourceManager {
 
         self.acceleration_structure_buffers.clear();
 
-        self.model_blases
-            .drain(..)
-            .for_each(|acceleration_structure| unsafe {
-                self.device
-                    .acceleration_structure
-                    .destroy_acceleration_structure(acceleration_structure, None);
-            });
+        self.meshes.drain(..).for_each(|mesh| unsafe {
+            self.device
+                .acceleration_structure
+                .destroy_acceleration_structure(mesh.blas, None);
+        });
 
         unsafe {
             self.device
