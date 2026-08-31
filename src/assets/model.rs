@@ -1,14 +1,13 @@
 use ash::vk;
-use bevy::ecs::component::Component;
 
-use crate::rendering::resource_manager::{ImageReference, ModelReference, SamplerReference};
+use crate::rendering::resource_manager::{ImageReference, SamplerReference};
 
 pub struct ModelRenderInfo {
     pub opaque: bool,
 }
 
 #[repr(C)]
-pub struct ModelData {
+pub struct GpuModel {
     pub positions: vk::DeviceAddress,
     pub indices: vk::DeviceAddress,
     pub normals: vk::DeviceAddress,
@@ -22,6 +21,7 @@ pub struct ModelData {
     pub base_color_texture_id: ImageReference,
     pub base_color_texcoord_id: u8,
     pub base_color_sampler_id: SamplerReference,
+    pub base_color_factor: [f32; 4],
 
     pub normal_texture_id: ImageReference,
     pub normal_texcoord_id: u8,
@@ -34,11 +34,5 @@ pub struct ModelData {
     pub emissive_texture_id: ImageReference,
     pub emissive_texcoord_id: u8,
     pub emissive_sampler_id: SamplerReference,
-
     pub emissive_factor: [f32; 3],
-}
-
-#[derive(Component, Clone)]
-pub struct Model {
-    pub model_ref: ModelReference,
 }

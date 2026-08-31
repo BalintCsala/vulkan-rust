@@ -4,15 +4,14 @@ use ash::vk;
 use bevy::{
     app::{Last, MainScheduleOrder, Plugin, PreStartup, Update},
     ecs::{
-        component::Component,
         entity::Entity,
-        query::{Added, Changed},
+        query::{Added, Changed, With},
         resource::Resource,
-        schedule::{IntoScheduleConfigs, ScheduleLabel},
-        system::{Commands, IntoResult, Query, Res, ResMut, Single},
+        schedule::{IntoScheduleConfigs, ScheduleLabel, SystemSet},
+        system::{Commands, Query, Res, ResMut, Single},
     },
     input::{ButtonInput, keyboard::KeyCode},
-    math::Vec3,
+    math::{Mat4, Vec3},
     transform::components::{GlobalTransform, Transform},
     window::{RawHandleWrapperHolder, Window},
 };
@@ -23,26 +22,18 @@ use vulkan_utils::{
     wrappers::device::Device,
 };
 
-use crate::{
-    assets::model::Model,
-    rendering::{
-        components::camera::Camera,
-        generated_pipelines::{
-            DirectLightingPipelinePushConstants, IndirectDiffusePipelinePushConstants,
-            MaterialsPipelinePushConstants, TonemapPipelinePushConstants,
-            VisibilityPipelinePushConstants, create_direct_lighting_pipeline,
-            create_indirect_diffuse_pipeline, create_materials_pipeline, create_tonemap_pipeline,
-            create_visibility_pipeline,
-        },
-        resource_manager::{ImageReference, ImageSize, InstanceReference, ResourceManager},
-        vulkan_state::VulkanState,
+use crate::rendering::{
+    components::{camera::Camera, model::Model},
+    generated_pipelines::{
+        DirectLightingPipelinePushConstants, IndirectDiffusePipelinePushConstants,
+        MaterialsPipelinePushConstants, TonemapPipelinePushConstants,
+        VisibilityPipelinePushConstants, create_direct_lighting_pipeline,
+        create_indirect_diffuse_pipeline, create_materials_pipeline, create_tonemap_pipeline,
+        create_visibility_pipeline,
     },
+    resource_manager::{ImageReference, ImageSize, ResourceManager},
+    vulkan_state::VulkanState,
 };
-
-#[derive(Component)]
-struct Renderable {
-    instance_ref: InstanceReference,
-}
 
 #[derive(Resource)]
 struct RendererState {
@@ -53,33 +44,99 @@ struct RendererState {
     indirect_diffuse_pipeline: RaytracingPipeline,
     tonemap_pipeline: GraphicsPipeline,
 
-    depth: ImageReference,
     visibility: ImageReference,
     gbuffer: ImageReference,
     direct_lighting: ImageReference,
     indirect_diffuse: ImageReference,
 
+    rendering_active: bool,
+
     frame: u32,
+}
+
+#[derive(Resource)]
+pub struct CommonRenderingResources {
+    pub depth: ImageReference,
+    pub view_projection: Mat4,
+    pub camera_position: Vec3,
 }
 
 pub struct RendererPlugin;
 
 #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
-struct PreRendering;
+pub struct PreRendering;
 
 #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
-struct Rendering;
+pub struct Rendering;
+
+#[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PostRendering;
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PostStages {
+    Opaque,
+    Translucent,
+    Final,
+}
+
+pub enum RenderLayer {
+    Visibility,
+    GBuffer,
+    Opaque,
+    Translucent,
+    Debug,
+}
 
 impl Plugin for RendererPlugin {
     fn build(&self, app: &mut bevy::app::App) {
         let mut schedule_order = app.world_mut().resource_mut::<MainScheduleOrder>();
         schedule_order.insert_after(Last, PreRendering);
         schedule_order.insert_after(PreRendering, Rendering);
+        schedule_order.insert_after(Rendering, PostRendering);
 
         app.add_systems(PreStartup, create_render_resources)
             .add_systems(Update, (reload_shaders, update_frame).chain())
-            .add_systems(PreRendering, on_new_renderables)
-            .add_systems(Rendering, render);
+            .add_systems(
+                PreRendering,
+                (on_new_renderables, on_changed_renderables, start_frame).chain(),
+            )
+            .add_systems(
+                Rendering,
+                (
+                    visibility,
+                    resolve_visibility,
+                    gbuffer,
+                    opaque,
+                    translucent,
+                    debug,
+                )
+                    .chain()
+                    .run_if(is_rendering_active),
+            )
+            .add_systems(PostRendering, end_frame.run_if(is_rendering_active));
+
+        app.configure_sets(
+            Rendering,
+            (
+                PostStages::Opaque
+                    .after(opaque)
+                    .before(translucent)
+                    .run_if(is_rendering_active),
+                PostStages::Translucent
+                    .after(translucent)
+                    .before(debug)
+                    .run_if(is_rendering_active),
+                PostStages::Final.after(debug).run_if(is_rendering_active),
+            ),
+        );
+
+        app.add_systems(
+            Rendering,
+            (
+                tonemap.in_set(PostStages::Translucent),
+                render_lighting.in_set(PostStages::Opaque),
+            ),
+        );
     }
 }
 
@@ -99,7 +156,9 @@ fn create_render_resources(
     );
 
     let mut resource_manager = ResourceManager::new(
+        &vulkan_state.instance,
         vulkan_state.device.clone(),
+        &vulkan_state.physical_device,
         vulkan_state.allocator.clone(),
         vulkan_state.queue,
         vulkan_state.extent,
@@ -154,14 +213,6 @@ fn create_render_resources(
             1,
             "Gbuffer".to_owned(),
         ),
-        depth: resource_manager.create_empty_image(
-            ImageSize::Scaled(1.0, 1.0),
-            vk::Format::D32_SFLOAT,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-            1,
-            1,
-            "Depth".to_owned(),
-        ),
         visibility: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
             vk::Format::R32_UINT,
@@ -172,7 +223,6 @@ fn create_render_resources(
             1,
             "Visibility".to_owned(),
         ),
-
         direct_lighting: resource_manager.create_empty_image(
             ImageSize::Scaled(1.0, 1.0),
             vk::Format::R16G16B16A16_SFLOAT,
@@ -190,7 +240,22 @@ fn create_render_resources(
             "Indirect diffuse".to_owned(),
         ),
 
+        rendering_active: false,
+
         frame: 0,
+    });
+
+    commands.insert_resource(CommonRenderingResources {
+        depth: resource_manager.create_empty_image(
+            ImageSize::Scaled(1.0, 1.0),
+            vk::Format::D32_SFLOAT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            1,
+            1,
+            "Depth".to_owned(),
+        ),
+        view_projection: Mat4::default(),
+        camera_position: Vec3::default(),
     });
 
     commands.insert_resource(resource_manager);
@@ -231,27 +296,36 @@ fn update_frame(
 }
 
 fn on_new_renderables(
-    vulkan_state: Res<VulkanState>,
     mut commands: Commands,
     renderables: Query<(Entity, &GlobalTransform, &Model), Added<Model>>,
     mut resource_manager: ResMut<ResourceManager>,
 ) {
     for (entity, transform, model) in renderables {
-        let instance_ref =
-            resource_manager.create_instance(&transform.to_matrix(), &model.model_ref);
-        commands.entity(entity).insert(Renderable { instance_ref });
+        resource_manager.create_instance(entity.index(), &transform.to_matrix(), &model.model_ref);
+        commands.entity(entity).insert(());
     }
 
-    resource_manager.build_acceleration_structures(&vulkan_state.device);
+    resource_manager.build_acceleration_structures();
 }
 
-fn render(
-    mut vulkan_state: ResMut<VulkanState>,
-    renderer_state: Res<RendererState>,
-    renderables: Query<(&Model, &Renderable)>,
+fn on_changed_renderables(
+    renderables: Query<(Entity, &GlobalTransform), (With<Model>, Changed<GlobalTransform>)>,
     mut resource_manager: ResMut<ResourceManager>,
-    camera: Single<(&Transform, &Camera)>,
+) {
+    for (entity, transform) in renderables {
+        resource_manager.update_instance(&entity.index(), &transform.to_matrix());
+    }
+
+    resource_manager.build_acceleration_structures();
+}
+
+fn start_frame(
+    mut vulkan_state: ResMut<VulkanState>,
+    mut resource_manager: ResMut<ResourceManager>,
+    mut renderer_state: ResMut<RendererState>,
     window: Single<&Window>,
+    camera: Single<(&Transform, &Camera)>,
+    mut rendering_res: ResMut<CommonRenderingResources>,
 ) {
     let width = window.width() as u32;
     let height = window.height() as u32;
@@ -262,18 +336,20 @@ fn render(
         resource_manager.resize(width, height);
     }
     if !vulkan_state.start_frame(width, height) {
+        renderer_state.rendering_active = false;
         return;
     }
 
     let (camera_transform, camera_data) = *camera;
-    let sun_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
 
-    let view_projection = camera_data
+    rendering_res.view_projection = camera_data
         .projection_matrix(vulkan_state.extent.width, vulkan_state.extent.height)
         * camera_transform.to_matrix().inverse();
+    rendering_res.camera_position = camera_transform.translation;
+
+    renderer_state.rendering_active = true;
 
     let device = vulkan_state.device.clone();
-
     let command_buffer = vulkan_state.get_command_buffer();
 
     [
@@ -292,6 +368,21 @@ fn render(
             &[],
         );
     });
+}
+
+fn is_rendering_active(renderer_state: Res<RendererState>) -> bool {
+    renderer_state.rendering_active
+}
+
+fn visibility(
+    mut vulkan_state: ResMut<VulkanState>,
+    resource_manager: Res<ResourceManager>,
+    renderer_state: Res<RendererState>,
+    renderables: Query<(Entity, &Model)>,
+    rendering_res: Res<CommonRenderingResources>,
+) {
+    let device = vulkan_state.device.clone();
+    let command_buffer = vulkan_state.get_command_buffer();
 
     unsafe {
         device.cmd_pipeline_barrier2(
@@ -325,7 +416,6 @@ fn render(
         );
     }
 
-    // Visibility
     renderer_state.visibility_pipeline.bind(command_buffer);
 
     unsafe {
@@ -374,7 +464,7 @@ fn render(
                     })])
                 .depth_attachment(
                     &vk::RenderingAttachmentInfo::default()
-                        .image_view(resource_manager.get_image(&renderer_state.depth).view)
+                        .image_view(resource_manager.get_image(&rendering_res.depth).view)
                         .image_layout(vk::ImageLayout::GENERAL)
                         .load_op(vk::AttachmentLoadOp::CLEAR)
                         .store_op(vk::AttachmentStoreOp::STORE)
@@ -390,7 +480,9 @@ fn render(
         models: resource_manager.model_buffer.address,
         instance_data: resource_manager.instance_buffer.address,
     };
-    view_projection.write_cols_to_slice(visibility_push_constants.view_projection.as_mut_slice());
+    rendering_res
+        .view_projection
+        .write_cols_to_slice(visibility_push_constants.view_projection.as_mut_slice());
     unsafe {
         device.cmd_push_constants(
             command_buffer,
@@ -401,7 +493,7 @@ fn render(
         );
     };
 
-    for (model, renderable) in renderables {
+    for (entity, model) in renderables {
         let index_data = resource_manager.get_index_data(model.model_ref);
         unsafe {
             device.cmd_bind_index_buffer(
@@ -417,15 +509,24 @@ fn render(
             1,
             0,
             0,
-            renderable.instance_ref as u32,
+            resource_manager.get_entity_instance_id(&entity.index()) as u32,
         );
     }
 
     unsafe {
         device.cmd_end_rendering(command_buffer);
     };
+}
 
-    // Materials
+fn resolve_visibility(
+    vulkan_state: Res<VulkanState>,
+    resource_manager: Res<ResourceManager>,
+    renderer_state: Res<RendererState>,
+    rendering_res: Res<CommonRenderingResources>,
+) {
+    let device = vulkan_state.device.clone();
+    let command_buffer = vulkan_state.get_command_buffer();
+
     renderer_state.materials_pipeline.bind(command_buffer);
 
     let mut materials_push_constants = MaterialsPipelinePushConstants {
@@ -439,7 +540,9 @@ fn render(
         visibility_buffer_id: renderer_state.visibility.into(),
         gbuffer_id: renderer_state.gbuffer.into(),
     };
-    view_projection.write_cols_to_slice(materials_push_constants.view_projection.as_mut_slice());
+    rendering_res
+        .view_projection
+        .write_cols_to_slice(materials_push_constants.view_projection.as_mut_slice());
 
     unsafe {
         device.cmd_push_constants(
@@ -457,6 +560,24 @@ fn render(
         vulkan_state.extent.height.div_ceil(8),
         1,
     );
+}
+
+fn gbuffer() {}
+
+fn opaque() {}
+
+fn translucent() {}
+
+fn render_lighting(
+    vulkan_state: Res<VulkanState>,
+    resource_manager: Res<ResourceManager>,
+    renderer_state: Res<RendererState>,
+    rendering_res: Res<CommonRenderingResources>,
+) {
+    let device = vulkan_state.device.clone();
+    let command_buffer = vulkan_state.get_command_buffer();
+
+    let sun_direction = Vec3::new(-1.0, 4.0, 2.0).normalize();
 
     unsafe {
         device.cmd_pipeline_barrier2(
@@ -486,17 +607,18 @@ fn render(
         instances: resource_manager.instance_buffer.address,
         view_projection_inv: [0.0; 16],
         camera_position: [0.0; 3],
-        depth_texture_id: renderer_state.depth.into(),
+        depth_texture_id: rendering_res.depth.into(),
         gbuffer_id: renderer_state.gbuffer.into(),
         direct_lighting_output_id: renderer_state.direct_lighting.into(),
         frame: renderer_state.frame,
         _pad0: 0,
     };
 
-    view_projection
+    rendering_res
+        .view_projection
         .inverse()
         .write_cols_to_slice(&mut direct_lighting_push_constants.view_projection_inv);
-    camera_transform.translation.write_to_slice(
+    rendering_res.camera_position.write_to_slice(
         direct_lighting_push_constants
             .camera_position
             .as_mut_slice(),
@@ -512,9 +634,12 @@ fn render(
         );
     }
 
-    renderer_state
-        .direct_lighting_pipeline
-        .trace_rays(command_buffer, width, height, 1);
+    renderer_state.direct_lighting_pipeline.trace_rays(
+        command_buffer,
+        vulkan_state.extent.width,
+        vulkan_state.extent.height,
+        1,
+    );
 
     // Indirect diffuse
     renderer_state
@@ -527,7 +652,7 @@ fn render(
         instances: resource_manager.instance_buffer.address,
         view_projection_inv: [0.0; 16],
         sun_dir: [0.0; 3],
-        depth_id: renderer_state.depth.into(),
+        depth_id: rendering_res.depth.into(),
         gbuffer_id: renderer_state.gbuffer.into(),
         output_id: renderer_state.indirect_diffuse.into(),
         frame: renderer_state.frame,
@@ -535,7 +660,8 @@ fn render(
     };
 
     sun_direction.write_to_slice(&mut indirect_diffuse_push_constants.sun_dir);
-    view_projection
+    rendering_res
+        .view_projection
         .inverse()
         .write_cols_to_slice(&mut indirect_diffuse_push_constants.view_projection_inv);
 
@@ -549,12 +675,23 @@ fn render(
         );
     }
 
-    renderer_state.indirect_diffuse_pipeline.trace_rays(
-        command_buffer,
-        width.div_ceil(2),
-        height.div_ceil(2),
-        1,
-    );
+    // renderer_state.indirect_diffuse_pipeline.trace_rays(
+    //     command_buffer,
+    //     width.div_ceil(2),
+    //     height.div_ceil(2),
+    //     1,
+    // );
+}
+
+fn debug() {}
+
+fn tonemap(
+    mut vulkan_state: ResMut<VulkanState>,
+    resource_manager: Res<ResourceManager>,
+    renderer_state: Res<RendererState>,
+) {
+    let device = vulkan_state.device.clone();
+    let command_buffer = vulkan_state.get_command_buffer();
 
     unsafe {
         device.cmd_pipeline_barrier2(
@@ -574,7 +711,6 @@ fn render(
         );
     };
 
-    // Tonemapping
     renderer_state.tonemap_pipeline.bind(command_buffer);
 
     unsafe {
@@ -622,6 +758,11 @@ fn render(
     unsafe {
         device.cmd_end_rendering(command_buffer);
     };
+}
+
+fn end_frame(mut vulkan_state: ResMut<VulkanState>) {
+    let device = vulkan_state.device.clone();
+    let command_buffer = vulkan_state.get_command_buffer();
 
     unsafe {
         device.cmd_pipeline_barrier2(

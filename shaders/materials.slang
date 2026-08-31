@@ -28,17 +28,11 @@ void cs(uint2 gid: SV_DispatchThreadID) {
         return;
     }
 
-
     var instanceId = getInstanceIdFromUniqueId(uniqueId);
     var triangleId = getTriangleIdFromUniqueId(uniqueId);
 
     var instance = pushConstants.instances[instanceId];
     var model = pushConstants.models[instance.modelId];
-
-    var baseColorTexture = getSampledImage<Texture2D<float4>>(model.baseColorTextureId);
-    var normalTexture = getSampledImage<Texture2D<float4>>(model.normalTextureId);
-    var baseColorSampler = getSampler<SamplerState>(model.baseColorSamplerId);
-    var normalSampler = getSampler<SamplerState>(model.normalSamplerId);
 
     var index0 = model.indices[triangleId * 3 + 0];
     var index1 = model.indices[triangleId * 3 + 1];
@@ -59,15 +53,29 @@ void cs(uint2 gid: SV_DispatchThreadID) {
     Material material;
 
     var fragmentData = model.getFragmentData(index0, index1, index2, position0, position1, position2, barycentrics);
-    fragmentData.tbn = mul(instance.normalMatrix, fragmentData.tbn);
 
-    var baseColorUV = fragmentData.uvs[model.baseColorTexcoordId];
-    material.baseColor =
-        baseColorTexture.SampleGrad(baseColorSampler, baseColorUV.value, baseColorUV.ddx, baseColorUV.ddy).rgb;
+    if (model.baseColorTextureId >= 0) {
+        var baseColorTexture = getSampledImage<Texture2D<float4>>(model.baseColorTextureId);
+        var baseColorSampler = getSampler<SamplerState>(model.baseColorSamplerId);
 
-    var normalUV = fragmentData.uvs[model.normalTexcoordId];
-    material.normal = normalTexture.SampleGrad(normalSampler, normalUV.value, normalUV.ddx, normalUV.ddy).xyz * 2.0 - 1.0;
-    material.normal = normalize(mul(material.normal, fragmentData.tbn));
+        var baseColorUV = fragmentData.uvs[model.baseColorTexcoordId];
+        material.baseColor =
+            baseColorTexture.SampleGrad(baseColorSampler, baseColorUV.value, baseColorUV.ddx, baseColorUV.ddy).rgb * model.baseColorFactor.rgb;
+    } else {
+        material.baseColor = model.baseColorFactor.rgb;
+    }
+
+    if (model.normalTextureId >= 0) {
+        var normalTexture = getSampledImage<Texture2D<float4>>(model.normalTextureId);
+        var normalSampler = getSampler<SamplerState>(model.normalSamplerId);
+
+        var normalUV = fragmentData.uvs[model.normalTexcoordId];
+        material.normal = normalTexture.SampleGrad(normalSampler, normalUV.value, normalUV.ddx, normalUV.ddy).xyz * 2.0 - 1.0;
+        material.normal = mul(material.normal, fragmentData.tbn);
+        material.normal = mul(instance.normalMatrix, material.normal);
+    } else {
+        material.normal = fragmentData.tbn[2];
+    }
 
     if (model.metallicRoughnessTextureId >= 0) {
         var metallicRoughnessTexture = getSampledImage<Texture2D<float4>>(model.metallicRoughnessTextureId);

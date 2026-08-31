@@ -23,6 +23,7 @@ impl Buffer {
         usage: vk::BufferUsageFlags,
         size: u64,
         name: &str,
+        min_alignment: Option<u64>,
     ) -> Self {
         let (buffer, allocation) = unsafe {
             allocator
@@ -36,6 +37,7 @@ impl Buffer {
                             | AllocationCreateFlags::HOST_ACCESS_ALLOW_TRANSFER_INSTEAD
                             | AllocationCreateFlags::MAPPED,
                         usage: MemoryUsage::Auto,
+                        min_alignment: min_alignment.unwrap_or_default(),
                         ..Default::default()
                     },
                 )

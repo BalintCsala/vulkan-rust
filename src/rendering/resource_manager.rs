@@ -1,13 +1,13 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, mem::offset_of, sync::Arc};
 
 use ash::vk;
 use bevy::{
-    ecs::resource::Resource,
+    ecs::{entity::EntityIndex, resource::Resource},
     math::{Mat3, Mat4, Vec3},
 };
 
 use crate::{
-    assets::model::{ModelData, ModelRenderInfo},
+    assets::model::{GpuModel, ModelRenderInfo},
     rendering::{
         command_cache::CommandCache,
         generated_pipelines::{MipmapPipelinePushConstants, create_mipmap_pipeline},
@@ -17,7 +17,9 @@ use vulkan_utils::{
     complex_types::{buffer::Buffer, image::Image},
     pipeline_generator::pipeline_types::{ComputePipeline, Pipeline},
     utility_functions::{format_to_aspect, mip_level_subresource_range},
-    wrappers::{allocator::Allocator, device::Device, fence::Fence, sampler::Sampler},
+    wrappers::{
+        allocator::Allocator, device::Device, fence::Fence, instance::Instance, sampler::Sampler,
+    },
 };
 
 const SAMPLED_IMAGE_BINDING: u32 = 0;
@@ -91,10 +93,31 @@ pub type ModelReference = u16;
 pub type InstanceReference = u16;
 
 #[repr(C)]
-struct InstanceData {
+struct GpuInstance {
     model: [f32; 16],
     normal: [f32; 9],
     model_id: u32,
+}
+
+impl GpuInstance {
+    pub fn new(model: Mat4, model_id: ModelReference) -> Self {
+        let mut res = Self {
+            model: [0.0; 16],
+            normal: [0.0; 9],
+            model_id: model_id.into(),
+        };
+        model.write_cols_to_slice(&mut res.model);
+        Mat3::from_mat4(model)
+            .inverse()
+            .transpose()
+            .write_cols_to_slice(&mut res.normal);
+        res
+    }
+}
+
+struct InstanceIndices {
+    instance_id: InstanceReference,
+    rt_instance_id: Option<InstanceReference>,
 }
 
 pub struct IndexData {
@@ -122,6 +145,10 @@ struct PendingBlasBuild {
 struct RTInstance {
     transform: vk::TransformMatrixKHR,
     model_reference: ModelReference,
+}
+
+struct Limits {
+    min_acceleration_structure_scratch_offset_alignment: u64,
 }
 
 #[derive(Resource)]
@@ -154,18 +181,22 @@ pub struct ResourceManager {
     fence: Fence,
 
     pub instance_buffer: Buffer,
-    rt_instances: Vec<RTInstance>,
     rt_instance_buffer: Buffer,
-    next_instance_ref: InstanceReference,
+    rt_instance_count: usize,
+    instances: HashMap<EntityIndex, InstanceIndices>,
 
     staging_buffer: Buffer,
 
     mipmap_pipeline: ComputePipeline,
+
+    limits: Limits,
 }
 
 impl ResourceManager {
     pub fn new(
+        instance: &Arc<Instance>,
         device: Arc<Device>,
+        physical_device: &vk::PhysicalDevice,
         allocator: Arc<Allocator>,
         queue: vk::Queue,
         extent: vk::Extent2D,
@@ -243,16 +274,18 @@ impl ResourceManager {
             &device,
             allocator.clone(),
             vk::BufferUsageFlags::empty(),
-            (MAX_MODEL_DATA_COUNT * size_of::<ModelData>()) as u64,
+            (MAX_MODEL_DATA_COUNT * size_of::<GpuModel>()) as u64,
             "Model data buffer",
+            None,
         );
 
         let instance_buffer = Buffer::new(
             &device,
             allocator.clone(),
             vk::BufferUsageFlags::empty(),
-            (MAX_MODEL_DATA_COUNT * size_of::<ModelData>()) as u64,
+            (MAX_MODEL_DATA_COUNT * size_of::<GpuModel>()) as u64,
             "Instance buffer",
+            None,
         );
 
         let staging_buffer = Buffer::new(
@@ -261,6 +294,7 @@ impl ResourceManager {
             vk::BufferUsageFlags::TRANSFER_SRC,
             STAGING_BUFFER_SIZE as u64,
             "Staging buffer",
+            None,
         );
 
         let command_cache = CommandCache::new(device.clone(), queue);
@@ -286,10 +320,18 @@ impl ResourceManager {
             allocator.clone(),
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
             RT_INSTANCE_BUFFER_SIZE,
-            "RT Instance Buffer",
+            "RT instance buffer",
+            None,
         );
 
         let fence = Fence::new(device.clone(), &vk::FenceCreateInfo::default());
+
+        let mut acceleration_structure_props =
+            vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
+        let mut props =
+            vk::PhysicalDeviceProperties2::default().push_next(&mut acceleration_structure_props);
+
+        unsafe { instance.get_physical_device_properties2(*physical_device, &mut props) };
 
         Self {
             device,
@@ -312,8 +354,12 @@ impl ResourceManager {
             pending_blas_builds: Vec::new(),
             acceleration_structure_buffers: Vec::new(),
             tlas: vk::AccelerationStructureKHR::null(),
-            rt_instances: Vec::new(),
+
             rt_instance_buffer,
+            rt_instance_count: 0,
+            instance_buffer,
+            instances: HashMap::new(),
+
             fence,
 
             command_cache,
@@ -321,9 +367,14 @@ impl ResourceManager {
             descriptor_pool,
             descriptor_layout,
             descriptor_set,
-            instance_buffer,
-            next_instance_ref: 0,
             mipmap_pipeline,
+
+            limits: Limits {
+                min_acceleration_structure_scratch_offset_alignment: u64::from(
+                    acceleration_structure_props
+                        .min_acceleration_structure_scratch_offset_alignment,
+                ),
+            },
         }
     }
 
@@ -658,7 +709,7 @@ impl ResourceManager {
 
     pub fn upload_model(
         &mut self,
-        model: ModelData,
+        model: GpuModel,
         index_buffer: Buffer,
         index_count: u32,
         position_count: u32,
@@ -677,7 +728,7 @@ impl ResourceManager {
         });
 
         self.model_buffer
-            .write(&[model], size_of::<ModelData>() * reference as usize);
+            .write(&[model], size_of::<GpuModel>() * reference as usize);
 
         self.index_data.push(IndexData {
             index_buffer,
@@ -689,7 +740,7 @@ impl ResourceManager {
         reference
     }
 
-    pub fn build_acceleration_structures(&mut self, device: &Arc<Device>) {
+    fn flush_pending_blases(&mut self) {
         if self.pending_blas_builds.is_empty() {
             return;
         }
@@ -748,7 +799,7 @@ impl ResourceManager {
 
                 let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
                 unsafe {
-                    device
+                    self.device
                         .acceleration_structure
                         .get_acceleration_structure_build_sizes(
                             vk::AccelerationStructureBuildTypeKHR::DEVICE,
@@ -765,6 +816,7 @@ impl ResourceManager {
                         | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                     size_info.acceleration_structure_size,
                     &format!("BLAS buffer #{}", self.acceleration_structure_buffers.len()),
+                    None,
                 );
 
                 let scratch_buffer = Buffer::new(
@@ -773,6 +825,10 @@ impl ResourceManager {
                     vk::BufferUsageFlags::STORAGE_BUFFER,
                     size_info.build_scratch_size,
                     "BLAS scratch buffer",
+                    Some(
+                        self.limits
+                            .min_acceleration_structure_scratch_offset_alignment,
+                    ),
                 );
 
                 build_info = build_info.scratch_data(vk::DeviceOrHostAddressKHR {
@@ -780,7 +836,7 @@ impl ResourceManager {
                 });
 
                 let blas = unsafe {
-                    device
+                    self.device
                         .acceleration_structure
                         .create_acceleration_structure(
                             &vk::AccelerationStructureCreateInfoKHR::default()
@@ -800,38 +856,24 @@ impl ResourceManager {
                 build_range_infos.push(build_range.as_slice());
             });
 
-        let blas_handles: Vec<_> = self
-            .model_blases
-            .iter()
-            .map(|&blas| unsafe {
-                device
-                    .acceleration_structure
-                    .get_acceleration_structure_device_address(
-                        &vk::AccelerationStructureDeviceAddressInfoKHR::default()
-                            .acceleration_structure(blas),
-                    )
-            })
-            .collect();
+        self.command_cache
+            .run_command(*self.fence, |&command_buffer| {
+                unsafe {
+                    self.device
+                        .acceleration_structure
+                        .cmd_build_acceleration_structures(
+                            command_buffer,
+                            &build_infos,
+                            &build_range_infos,
+                        )
+                };
+            });
 
-        let rt_instance_data: Vec<_> = self
-            .rt_instances
-            .iter()
-            .enumerate()
-            .map(
-                |(reference, instance_data)| vk::AccelerationStructureInstanceKHR {
-                    transform: instance_data.transform,
-                    instance_custom_index_and_mask: vk::Packed24_8::new(reference as u32, 0xFF),
-                    instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
-                        0,
-                        vk::GeometryInstanceFlagsKHR::empty().as_raw() as u8,
-                    ),
-                    acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                        device_handle: blas_handles[instance_data.model_reference as usize],
-                    },
-                },
-            )
-            .collect();
-        self.rt_instance_buffer.write(&rt_instance_data, 0);
+        self.pending_blas_builds.clear();
+    }
+
+    pub fn build_acceleration_structures(&mut self) {
+        self.flush_pending_blases();
 
         let tlas_geometries = [vk::AccelerationStructureGeometryKHR::default()
             .geometry_type(vk::GeometryTypeKHR::INSTANCES)
@@ -852,12 +894,12 @@ impl ResourceManager {
 
         let mut tlas_build_sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
-            device
+            self.device
                 .acceleration_structure
                 .get_acceleration_structure_build_sizes(
                     vk::AccelerationStructureBuildTypeKHR::DEVICE,
                     &tlas_build_info,
-                    &[self.rt_instances.len() as u32],
+                    &[self.rt_instance_count as u32],
                     &mut tlas_build_sizes,
                 );
         };
@@ -869,10 +911,11 @@ impl ResourceManager {
                 | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
             tlas_build_sizes.acceleration_structure_size,
             "TLAS Buffer",
+            None,
         );
 
         self.tlas = unsafe {
-            device
+            self.device
                 .acceleration_structure
                 .create_acceleration_structure(
                     &vk::AccelerationStructureCreateInfoKHR::default()
@@ -892,6 +935,10 @@ impl ResourceManager {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             tlas_build_sizes.build_scratch_size,
             "TLAS Scratch Buffer",
+            Some(
+                self.limits
+                    .min_acceleration_structure_scratch_offset_alignment,
+            ),
         );
         tlas_build_info = tlas_build_info.scratch_data(vk::DeviceOrHostAddressKHR {
             device_address: tlas_scratch_buffer.address,
@@ -901,21 +948,11 @@ impl ResourceManager {
             .first_vertex(0)
             .transform_offset(0)
             .primitive_offset(0)
-            .primitive_count(self.rt_instances.len() as u32)];
+            .primitive_count(u32::try_from(self.rt_instance_count).unwrap())];
 
         self.fence.reset();
         self.command_cache
             .run_command(*self.fence, |&command_buffer| {
-                unsafe {
-                    device
-                        .acceleration_structure
-                        .cmd_build_acceleration_structures(
-                            command_buffer,
-                            &build_infos,
-                            &build_range_infos,
-                        )
-                };
-
                 unsafe {
                     self.device.cmd_pipeline_barrier2(
                         command_buffer,
@@ -934,7 +971,7 @@ impl ResourceManager {
                 }
 
                 unsafe {
-                    device
+                    self.device
                         .acceleration_structure
                         .cmd_build_acceleration_structures(
                             command_buffer,
@@ -945,23 +982,24 @@ impl ResourceManager {
             });
 
         self.fence.wait();
-        self.pending_blas_builds.clear();
     }
 
     pub fn create_instance(
         &mut self,
+        entity_id: EntityIndex,
         model_matrix: &Mat4,
         model_ref: &ModelReference,
-    ) -> InstanceReference {
-        let reference = self.next_instance_ref;
-        self.next_instance_ref += 1;
+    ) {
+        self.flush_pending_blases();
 
-        let mut instance_data = InstanceData {
-            model: [0.0; 16],
-            normal: [0.0; 9],
-            model_id: (*model_ref) as u32,
-        };
-        model_matrix.write_cols_to_slice(&mut instance_data.model);
+        let instance_id = self.instances.len();
+        let rt_instance_id = self.rt_instance_count;
+        self.rt_instance_count += 1;
+
+        self.instance_buffer.write(
+            &[GpuInstance::new(*model_matrix, *model_ref)],
+            size_of::<GpuInstance>() * instance_id,
+        );
 
         let mut rt_instance = [0.0f32; 12];
         for i in 0..3 {
@@ -970,24 +1008,62 @@ impl ResourceManager {
                 .row(i)
                 .write_to_slice(&mut rt_instance[start_index..start_index + 4]);
         }
-        self.rt_instances.push(RTInstance {
+        let blas_address = unsafe {
+            self.device
+                .acceleration_structure
+                .get_acceleration_structure_device_address(
+                    &vk::AccelerationStructureDeviceAddressInfoKHR::default()
+                        .acceleration_structure(self.model_blases[usize::from(*model_ref)]),
+                )
+        };
+        let rt_instance_data = [vk::AccelerationStructureInstanceKHR {
             transform: vk::TransformMatrixKHR {
                 matrix: rt_instance,
             },
-            model_reference: *model_ref,
-        });
-
-        Mat3::from_mat4(*model_matrix)
-            .transpose()
-            .inverse()
-            .write_cols_to_slice(&mut instance_data.normal);
-
-        self.instance_buffer.write(
-            &[instance_data],
-            size_of::<InstanceData>() * reference as usize,
+            instance_custom_index_and_mask: vk::Packed24_8::new(rt_instance_id as u32, 0xFF),
+            instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
+                0,
+                vk::GeometryInstanceFlagsKHR::empty().as_raw() as u8,
+            ),
+            acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                device_handle: blas_address,
+            },
+        }];
+        self.rt_instance_buffer.write(
+            &rt_instance_data,
+            rt_instance_id * size_of::<vk::AccelerationStructureInstanceKHR>(),
         );
 
-        reference
+        self.instances.insert(
+            entity_id,
+            InstanceIndices {
+                instance_id: InstanceReference::try_from(instance_id).unwrap(),
+                rt_instance_id: Some(InstanceReference::try_from(rt_instance_id).unwrap()),
+            },
+        );
+    }
+
+    pub fn update_instance(&mut self, entity_id: &EntityIndex, model_matrix: &Mat4) {
+        let instance_id = self.get_entity_instance_id(entity_id);
+
+        let mut model = [0.0; 16];
+        model_matrix.write_cols_to_slice(&mut model);
+
+        let mut normal = [0.0; 9];
+        Mat3::from_mat4(*model_matrix)
+            .inverse()
+            .transpose()
+            .write_cols_to_slice(&mut normal);
+
+        self.instance_buffer.write(
+            &[model],
+            size_of::<GpuInstance>() * usize::from(instance_id) + offset_of!(GpuInstance, model),
+        );
+        self.instance_buffer.write(
+            &[normal],
+            size_of::<GpuInstance>() * usize::from(instance_id) + offset_of!(GpuInstance, normal),
+        );
+        // TODO: RT instance
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -1112,6 +1188,10 @@ impl ResourceManager {
 
     pub fn get_image_reference_by_name(&self, name: &str) -> Option<ImageReference> {
         self.images_by_name.get(name).copied()
+    }
+
+    pub fn get_entity_instance_id(&self, entity_id: &EntityIndex) -> InstanceReference {
+        self.instances[entity_id].instance_id
     }
 }
 

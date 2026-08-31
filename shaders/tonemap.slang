@@ -25,6 +25,7 @@ VertexOut vs(uint index : SV_VertexID) {
         case 1:
             o.position = float4(-1.0, 3.0, 0.0, 1.0);
             break;
+        default:
         case 2:
             o.position = float4(3.0, -1.0, 0.0, 1.0);
             break;

@@ -29,7 +29,7 @@ float3 pathtrace(RaytracingAccelerationStructure tlas, float3 worldPos, float3 r
     ray.Direction = rayDir;
     ray.TMin = 0.01;
     ray.TMax = 256.0;
-    
+
     Payload payload;
     TraceRay(tlas, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
 

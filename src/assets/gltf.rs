@@ -18,9 +18,12 @@ use image::{ImageError, ImageFormat, ImageReader};
 use crate::{
     assets::{
         gltf::types::AlphaMode,
-        model::{Model, ModelData, ModelRenderInfo},
+        model::{GpuModel, ModelRenderInfo},
     },
-    rendering::resource_manager::{ImageReference, ImageSize, ResourceManager, SamplerReference},
+    rendering::{
+        components::model::Model,
+        resource_manager::{ImageReference, ImageSize, ResourceManager, SamplerReference},
+    },
 };
 
 use vulkan_utils::{
@@ -423,6 +426,7 @@ impl Gltf {
                     | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                 data.len() as u64,
                 &format!("{mesh_name} {name}"),
+                None,
             );
             buffer.write(&data, 0);
 
@@ -470,6 +474,7 @@ impl Gltf {
                         | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                     data.len() as u64,
                     &indices_name,
+                    None,
                 );
                 indices.write(&data, 0);
 
@@ -483,31 +488,12 @@ impl Gltf {
                         | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                     positions_count as u64,
                     &indices_name,
+                    None,
                 );
                 indices.write(Vec::from_iter(0..positions_count as u32).as_slice(), 0);
                 (indices, positions_count)
             }
         };
-
-        let base_color_fallback_texture = resource_manager.get_or_create_image(
-            ImageSize::Fixed(1, 1),
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-            1,
-            1,
-            "Base color fallback".to_owned(),
-            &[0xFFFFFFFFu32],
-        );
-
-        let normal_fallback_texture = resource_manager.get_or_create_image(
-            ImageSize::Fixed(1, 1),
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-            1,
-            1,
-            "Normal fallback".to_owned(),
-            &[0xFF80FF80u32],
-        );
 
         let opaque = (|| {
             Some(matches!(
@@ -527,7 +513,17 @@ impl Gltf {
             let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
             Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
-        .unwrap_or((base_color_fallback_texture, 0, 0));
+        .unwrap_or((-1, 0, 0));
+
+        let base_color_factor = (|| {
+            Some(
+                info.materials.as_ref()?[primitive.material?]
+                    .pbr_metallic_roughness
+                    .as_ref()?
+                    .base_color_factor,
+            )
+        })()
+        .unwrap_or([1.0, 1.0, 1.0, 1.0]);
 
         let (normal_texture_id, normal_texcoord_id, normal_sampler_id) = (|| {
             let texture = info.materials.as_ref()?[primitive.material?]
@@ -536,7 +532,7 @@ impl Gltf {
             let (image_ref, sampler_ref) = texture_lookup.get(&texture.index)?;
             Some((*image_ref, texture.tex_coord, *sampler_ref))
         })()
-        .unwrap_or((normal_fallback_texture, 0, 0));
+        .unwrap_or((-1, 0, 0));
 
         let (
             metallic_roughness_texture_id,
@@ -563,10 +559,11 @@ impl Gltf {
         .unwrap_or((-1, 0, 0));
 
         let emissive_factor =
-            (|| Some(info.materials.as_ref()?[primitive.material?].emissive_factor))().unwrap();
+            (|| Some(info.materials.as_ref()?[primitive.material?].emissive_factor))()
+                .unwrap_or([0.0, 0.0, 0.0]);
 
         let model_ref = resource_manager.upload_model(
-            ModelData {
+            GpuModel {
                 positions,
                 indices: indices.address,
                 normals: normals.unwrap_or(0),
@@ -580,6 +577,7 @@ impl Gltf {
                 base_color_texture_id,
                 base_color_texcoord_id,
                 base_color_sampler_id,
+                base_color_factor,
 
                 normal_texture_id,
                 normal_texcoord_id,
@@ -592,7 +590,6 @@ impl Gltf {
                 emissive_texture_id,
                 emissive_texcoord_id,
                 emissive_sampler_id,
-
                 emissive_factor,
             },
             indices,

@@ -13,9 +13,9 @@ PushConstants pushConstants;
 struct VSOut {
     float4 position : SV_Position;
     float2 uv;
-    nointerpolation uint textureId;
-    nointerpolation uint samplerId;
-    nointerpolation uint instanceId;
+    nointerpolation int textureId;
+    nointerpolation int samplerId;
+    nointerpolation int instanceId;
     nointerpolation uint vid;
 };
 
@@ -32,7 +32,7 @@ VSOut vs(uint id: SV_VertexID, uint instanceId: SV_VulkanInstanceID) {
 
     output.textureId = model.baseColorTextureId;
     output.samplerId = model.baseColorSamplerId;
-    float2 *texcoords;
+    float2 *texcoords = nullptr;
     switch (model.baseColorTexcoordId) {
         case 0:
             texcoords = model.texcoords0;
@@ -52,7 +52,7 @@ VSOut vs(uint id: SV_VertexID, uint instanceId: SV_VulkanInstanceID) {
 
 [shader("fragment")]
 uint fs(VSOut input, uint triangleId: SV_PrimitiveID) {
-    if (input.textureId != 0xFFFF) {
+    if (input.textureId >= 0) {
         var texture = getSampledImage<Texture2D<float4>>(input.textureId);
         var sampler = getSampler<SamplerState>(input.samplerId);
 

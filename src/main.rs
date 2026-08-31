@@ -11,17 +11,19 @@ use bevy::{
     a11y::AccessibilityPlugin,
     app::{App, Startup, Update},
     ecs::{
+        component::Component,
+        entity::Entity,
         message::MessageReader,
-        query::With,
+        query::{With, Without},
         resource::Resource,
-        system::{Commands, Res, ResMut, Single},
+        system::{Commands, Query, Res, ResMut, Single},
     },
     input::{
         ButtonInput, InputPlugin,
         keyboard::KeyCode,
         mouse::{MouseButton, MouseMotion},
     },
-    math::{Quat, Vec3},
+    math::{Quat, Vec3, vec3},
     time::Time,
     transform::{TransformPlugin, components::Transform},
     window::{Window, WindowPlugin, WindowResolution},
@@ -31,14 +33,20 @@ use bevy::{
 use crate::{
     assets::gltf::Gltf,
     rendering::{
-        components::camera::{Camera, CameraResolution},
+        components::{
+            camera::{Camera, CameraResolution},
+            renderable::Renderable,
+        },
+        generated_pipelines::create_debug,
         renderer_plugin::RendererPlugin,
         resource_manager::ResourceManager,
         vulkan_state::VulkanState,
     },
 };
 
-use vulkan_utils::wrappers::device::Device;
+use vulkan_utils::{
+    pipeline_generator::pipeline_types::GraphicsPipeline, wrappers::device::Device,
+};
 
 mod assets;
 mod rendering;
@@ -52,7 +60,12 @@ struct RenderingRes {
     last_frame_time: Instant,
     frame: u32,
     _scene_files: Vec<Gltf>,
+
+    debug_pipeline: GraphicsPipeline,
 }
+
+#[derive(Component)]
+struct DebugArrow;
 
 impl Drop for RenderingRes {
     fn drop(&mut self) {
@@ -83,7 +96,7 @@ fn main() {
             RendererPlugin,
         ))
         .add_systems(Startup, (init_rendering, setup_scene))
-        .add_systems(Update, (keyboard_input, mouse_input, update))
+        .add_systems(Update, (keyboard_input, mouse_input, update, center_arrow))
         .run();
 }
 
@@ -103,6 +116,50 @@ fn setup_scene(mut commands: Commands) {
     ));
 }
 
+fn gltf_to_entity_tree(
+    commands: &mut Commands,
+    gltf: &Gltf,
+    scene_id: usize,
+    parent_entity: Entity,
+) {
+    let scene = &gltf.scenes.as_ref().unwrap()[scene_id];
+
+    let mut remaining_nodes: VecDeque<_> = scene
+        .nodes
+        .iter()
+        .map(|node_id| (node_id, parent_entity))
+        .collect();
+
+    while let Some((node_id, parent)) = remaining_nodes.pop_front() {
+        let node = &gltf.nodes[*node_id];
+        let mesh_entity = commands
+            .spawn(Transform::from_matrix(node.model_matrix()))
+            .id();
+
+        commands.entity(parent).add_children(&[mesh_entity]);
+
+        if let Some(mesh_id) = node.mesh {
+            let mut children = Vec::new();
+            for primitive_id in &gltf.meshes[mesh_id].primitives {
+                let model = &gltf.primitives[*primitive_id];
+                children.push(
+                    commands
+                        .spawn(Renderable {
+                            model: model.clone(),
+                            transform: Transform::IDENTITY,
+                        })
+                        .id(),
+                );
+            }
+            commands.entity(mesh_entity).add_children(&children);
+        }
+
+        if let Some(children) = &node.children {
+            remaining_nodes.extend(children.iter().map(|node_id| (node_id, mesh_entity)));
+        }
+    }
+}
+
 fn init_rendering(
     mut commands: Commands,
     vulkan_state: Res<VulkanState>,
@@ -118,52 +175,46 @@ fn init_rendering(
             &mut File::open(format!("./assets/{line}")).unwrap(),
         )
         .unwrap();
-
-        let scenes = gltf.scenes.as_ref().unwrap();
-        let scene = &scenes[gltf.scene.unwrap_or(0)];
-
-        let gltf_entity = commands.spawn(Transform::IDENTITY).id();
-
-        let mut remaining_nodes: VecDeque<_> = scene
-            .nodes
-            .iter()
-            .map(|node_id| (node_id, gltf_entity))
-            .collect();
-
-        while let Some((node_id, parent)) = remaining_nodes.pop_front() {
-            let node = &gltf.nodes[*node_id];
-            let mesh_entity = commands
-                .spawn(Transform::from_matrix(node.model_matrix()))
-                .id();
-
-            commands.entity(parent).add_children(&[mesh_entity]);
-
-            if let Some(mesh_id) = node.mesh {
-                let mut children = Vec::new();
-                for primitive_id in &gltf.meshes[mesh_id].primitives {
-                    let primitive = &gltf.primitives[*primitive_id];
-                    children.push(
-                        commands
-                            .spawn((Transform::IDENTITY, primitive.clone()))
-                            .id(),
-                    );
-                }
-                commands.entity(mesh_entity).add_children(&children);
-            }
-
-            if let Some(children) = &node.children {
-                remaining_nodes.extend(children.iter().map(|node_id| (node_id, mesh_entity)));
-            }
-        }
+        let parent_entity = commands.spawn(Transform::IDENTITY).id();
+        gltf_to_entity_tree(
+            &mut commands,
+            &gltf,
+            gltf.scene.unwrap_or_default(),
+            parent_entity,
+        );
 
         scene_files.push(gltf);
     }
+
+    let arrow = Gltf::from_glb(
+        &vulkan_state.device,
+        &vulkan_state.allocator,
+        &mut resource_manager,
+        &mut File::open("assets/Arrows.glb").unwrap(),
+    )
+    .unwrap();
+    let parent_entity = commands
+        .spawn((Transform::from_scale(vec3(0.1, 0.1, 0.1)), DebugArrow))
+        .id();
+    gltf_to_entity_tree(
+        &mut commands,
+        &arrow,
+        arrow.scene.unwrap_or_default(),
+        parent_entity,
+    );
+
+    scene_files.push(arrow);
 
     commands.insert_resource(RenderingRes {
         device: vulkan_state.device.clone(),
         last_frame_time: Instant::now(),
         frame: 0,
         _scene_files: scene_files,
+        debug_pipeline: create_debug(
+            vulkan_state.device.clone(),
+            resource_manager.bindless_pipeline_layout,
+            vulkan_state.surface_format.format,
+        ),
     });
 }
 
@@ -174,6 +225,15 @@ fn update(mut rendering_res: ResMut<RenderingRes>, mut window: Single<&mut Windo
         rendering_res.last_frame_time = Instant::now();
     }
     rendering_res.frame += 1
+}
+
+fn center_arrow(
+    mut arrows: Query<&mut Transform, (With<DebugArrow>, Without<Camera>)>,
+    camera: Single<&Transform, With<Camera>>,
+) {
+    for mut transform in &mut arrows {
+        transform.translation = camera.translation + camera.forward() * 2.0
+    }
 }
 
 fn keyboard_input(
